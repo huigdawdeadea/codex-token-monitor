@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Codex Token Monitor</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="ambient ambient-one"></div>
+  <div class="ambient ambient-two"></div>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="#overview" aria-label="Codex Token Monitor 首页">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span>
+          <strong>Token Monitor</strong>
+        </span>
+      </a>
+
+      <nav class="nav" aria-label="主导航">
+        <button class="nav-item active" data-view="overview"><span>01</span>当前态势</button>
+        <button class="nav-item" data-view="usage"><span>02</span>用量统计</button>
+        <button class="nav-item" data-view="sessions"><span>03</span>会话账本</button>
+        <button class="nav-item" data-view="models"><span>04</span>模型对比</button>
+        <button class="nav-item" data-view="rankings"><span>05</span>消耗排行</button>
+        <button class="nav-item" data-view="settings"><span>06</span>监控设置</button>
+      </nav>
+
+      <div class="sidebar-status" id="sidebar-status">
+        <span class="status-dot"></span>
+        <div><strong>正在启动</strong><small>等待第一次只读扫描</small></div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <h1 id="page-title">当前态势</h1>
+        </div>
+        <div class="topbar-actions">
+          <span class="last-update" id="last-update">尚未更新</span>
+          <button class="icon-button" id="refresh-button" title="立即刷新" aria-label="立即刷新">↻</button>
+        </div>
+      </header>
+
+      <div class="notice hidden" id="notice" role="status" aria-live="polite"></div>
+
+      <section class="view active" id="view-overview" aria-labelledby="page-title">
+        <div id="overview-content" class="loading-panel">正在读取本机 Codex 会话元数据...</div>
+      </section>
+
+      <section class="view" id="view-usage" aria-labelledby="page-title">
+        <div class="section-intro">
+          <div><h2>每天用了多少</h2></div>
+          <p>按每次调用报告的 token 归属到本地日期。缓存输入是输入细分，不重复计入总量。</p>
+        </div>
+        <div id="usage-content" class="loading-panel">正在汇总每日 token...</div>
+      </section>
+
+      <section class="view" id="view-sessions" aria-labelledby="page-title">
+        <div class="section-intro">
+          <div><h2>每个会话，各算各的</h2></div>
+          <p>累计消耗与估算上下文压力分开记录。静止不等于结束。</p>
+        </div>
+        <div class="filter-row">
+          <input id="session-search" type="search" placeholder="搜索标题、会话 ID 或模型" autocomplete="off">
+          <select id="session-filter" aria-label="筛选会话">
+            <option value="all">全部会话</option>
+            <option value="active">仅活动</option>
+            <option value="degraded">数据异常</option>
+          </select>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>会话</th><th>模型</th><th>参考成本</th><th id="session-token-sort-header" aria-sort="none"><button id="session-token-sort" class="table-sort-button" type="button" aria-label="按累计 token 从高到低排序">累计 token <span id="session-token-sort-indicator" aria-hidden="true">↕</span></button></th><th>上下文压力</th><th>最后活动</th><th>操作</th></tr></thead>
+            <tbody id="session-table-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="view" id="view-models" aria-labelledby="page-title">
+        <div class="section-intro">
+          <div><h2>只描述消耗，不评判效率</h2></div>
+          <p>任务难度不同，总 token 不能证明模型优劣。reasoning effort 可展开查看。</p>
+        </div>
+        <div class="model-grid" id="model-grid"></div>
+      </section>
+
+      <section class="view" id="view-rankings" aria-labelledby="page-title">
+        <div class="section-intro ranking-intro">
+          <div><h2>看见消耗集中在哪里</h2></div>
+          <p>日期榜看每天增量，会话榜看单个会话累计，项目榜按会话工作目录归并。排名只表示消耗量，不代表效率高低。</p>
+        </div>
+        <div class="ranking-toolbar" role="group" aria-label="排行口径">
+          <button class="ranking-mode active" type="button" data-ranking-mode="days" aria-pressed="true">按天排行</button>
+          <button class="ranking-mode" type="button" data-ranking-mode="sessions" aria-pressed="false">按会话排行</button>
+          <button class="ranking-mode" type="button" data-ranking-mode="projects" aria-pressed="false">按项目排行</button>
+        </div>
+        <div id="ranking-content" class="loading-panel">正在生成 token 排行...</div>
+      </section>
+
+      <section class="view" id="view-settings" aria-labelledby="page-title">
+        <div class="section-intro">
+          <div><h2>隐私与数据控制</h2></div>
+          <p>所有修改只写入监控器自己的本地数据库，不修改 Codex 文件。</p>
+        </div>
+        <form id="settings-form" class="settings-grid">
+          <article class="settings-card">
+            <span class="card-number">A</span><h3>活动与标题</h3>
+            <div class="field-pair">
+              <label for="active-window">活动窗口，分钟</label>
+              <input id="active-window" type="number" min="1" max="120" required>
+            </div>
+            <div class="field-pair">
+              <label for="title-retention">标题保留，天</label>
+              <input id="title-retention" type="number" min="1" max="3650" required>
+            </div>
+            <label class="switch-row"><input id="capture-titles" type="checkbox"><span class="switch"></span><span>读取并保存会话标题</span></label>
+            <label class="switch-row"><input id="startup-enabled" type="checkbox"><span class="switch"></span><span>随 Windows 登录启动</span></label>
+            <small id="startup-note">发布版验收后可启用</small>
+          </article>
+          <article class="settings-card danger-card">
+            <span class="card-number">B</span><h3>数据清理</h3>
+            <p>清除历史不会删除 Codex 原始文件。监控器保留当前读取断点，后续新 token 会重新建立会话。</p>
+            <div class="danger-actions">
+              <button type="button" class="secondary-button" id="clear-titles">清除全部标题</button>
+              <button type="button" class="danger-button" id="clear-history">清除监控历史</button>
+            </div>
+          </article>
+          <div class="form-actions">
+            <button type="submit" class="primary-button">保存设置</button>
+          </div>
+        </form>
+      </section>
+    </main>
+  </div>
+
+  <dialog class="session-detail-dialog" id="session-detail-dialog" aria-labelledby="session-detail-title">
+    <button class="dialog-close" id="session-detail-close" type="button" aria-label="关闭会话详情">×</button>
+    <div id="session-detail-content"></div>
+  </dialog>
+  <script src="/app.js" defer></script>
+</body>
+</html>

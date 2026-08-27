@@ -1,0 +1,98 @@
+# Codex Token Monitor
+
+Windows 本地只读的 Codex Desktop 会话 token 监控器。
+
+## 非官方声明与费用说明
+
+本项目是非官方社区工具，与 OpenAI 不存在隶属、授权或合作关系。Codex、OpenAI 及相关商标归其各自权利人所有。
+
+项目内置的模型名称和单价仅用于演示如何把本地 token 换算成自定义 API 等值参考成本，并非经过 OpenAI 官方确认的当前价格，也不代表 Codex Desktop、ChatGPT 订阅或 OpenAI API 的实际账单。参考价格可能过时，使用者应根据自己的计价口径核对或修改源码中的价格表。
+
+它把两个不同概念分开显示：
+
+- 会话累计处理量：Codex 报告的累计 input、output 和 total token，包含该会话历次调用。
+- 当前上下文估算：Codex 最近报告的上下文 token 除以模型上下文窗口。
+
+例如，页面可能同时显示“累计处理量 119.1 万”和“当前上下文 145,403 / 258,400，56%”。两者口径不同，不应相等。Codex 客户端右下角的上下文数字应与页面的“当前上下文估算”比较，而不是与主卡片的累计处理量比较。累计处理量持续增加；Codex 压缩上下文后，当前上下文估算可能下降。
+
+## 第一版能力
+
+- 实时监听当前电脑上的 Codex Desktop rollout JSONL。
+- 按会话展示累计处理量、当前上下文估算、输入输出细分、模型、reasoning effort、活动时间和采集状态。
+- 会话账本支持点击“累计 token”表头，在从高到低与从低到高之间切换；搜索、筛选和自动刷新会保留当前排序。
+- 按 Windows 本地日期汇总今日处理量、累计处理量、最近 14 天趋势和最近 7 天明细。
+- 展示每日、每周和每月 token 按项目内置的自定义参考单价折算的 API 等值美元成本，并明确区分该参考值与 Codex Desktop、ChatGPT 订阅或 OpenAI API 的实际账单。
+- 会话卡片和会话账本展示每个会话的 API 等值参考成本；会话详情展示该会话所用模型、总参考成本及 token 计价细分。
+- 会话详情可按用户问题查看模型、模型调用次数、输入、缓存输入、输出、总 token 和参考成本，最多展示最近 200 个问题。
+- 每日统计累加每次 token 事件的 `last_token_usage`，重复扫描不会重复计数。
+- 可选择最近 14 天中的任意日期，查看相对前一天、此前 7 个自然日日均值的变化，以及当日 Top 5 会话贡献。
+- 可在任意会话详情中手动标记任务类型、最终结果、人工耗时和返工原因。
+- 分析页展示已标记覆盖率、已完成任务平均 token 和返工 token 占比，把消耗与结果关联起来。
+- 消耗排行提供按天、按会话和按项目三种口径；项目榜显示会话数、模型数、累计 token、API 等值参考成本及未计价 token。
+- 每个会话的当前结果标记会应用到它出现过的历史日期。它不是当时状态的历史快照。
+- 分析结果提供消耗与结果数据，不把 token 多少单独判断为任务效率或质量。
+- 可从概览页的其他会话卡片或会话账本打开任意会话的只读详情面板。
+- 托盘常驻，双击打开仅绑定 `127.0.0.1` 的本地网页。
+- 程序已在后台运行时，再次双击 EXE 会通知已有实例打开当前监控页面，不会静默退出。
+- 提供会话历史、模型汇总、标题保留和数据清理。
+- 只展示 token 和上下文状态，不发送超量提醒。
+- 发布版可选择随 Windows 登录启动，默认关闭。
+
+## 隐私边界
+
+监控器持续采集时只从 Codex 文件中提取白名单元数据：会话 ID、标题、模型、reasoning effort、项目工作目录、时间和 token 数字。项目工作目录优先归并到已有 Git 仓库根目录，用于项目消耗统计。只有在用户打开某个会话详情时，监控器才会从该会话的原始 rollout 文件只读提取用户问题预览，用于逐问题明细；问题正文不写入监控器数据库。
+
+- Codex 源文件只读打开，不修改、不删除。
+- 监控器数据库位于 `%LOCALAPPDATA%\CodexTokenMonitor\monitor.db`。
+- 标题是唯一保存的正文衍生字段，默认保留 90 天，可关闭采集或一键清除。
+- 任务结果标记由用户手动填写，只写入监控器自己的 `session_annotations` 表，不修改 Codex 文件。
+- 任务结果使用固定选项和可选分钟数，不保存自由文本备注。
+- 逐问题预览最多截取 280 个字符，只在详情请求期间读取；不读取助手回复、工具输出、命令内容或工作区文件内容。
+- 本地网页不监听局域网地址，不使用外部 CDN，不上传数据。
+- `?mask=1` 可在共享屏幕或截图时隐藏标题、项目名称与路径、问题正文，并缩短会话 ID。
+
+## 数据来源与兼容性
+
+实时主来源：
+
+```text
+%USERPROFILE%\.codex\sessions\YYYY\MM\DD\rollout-*.jsonl
+```
+
+模型、reasoning effort 和可选标题从 Codex 本地索引与只读 SQLite 补充。这些都是 Codex 当前版本的本地实现细节，不是公开稳定 API。监控器遇到无法识别的格式时保留最后成功值，并在页面显示停止更新或降级状态，不会用 0 冒充真实数据。
+
+## 开发
+
+需要 .NET 8 SDK：
+
+```powershell
+dotnet restore CodexTokenMonitor.sln
+dotnet test tests\CodexTokenMonitor.Tests\CodexTokenMonitor.Tests.csproj --no-restore
+dotnet build CodexTokenMonitor.sln --no-restore
+```
+
+运行开发版：
+
+```powershell
+dotnet run --project src\CodexTokenMonitor.App\CodexTokenMonitor.App.csproj -- --no-browser
+```
+
+开发版不会启用 Windows 登录启动开关。
+
+## 发布
+
+创建 Windows x64 自包含发布目录：
+
+```powershell
+.\scripts\Publish.ps1
+```
+
+输出位于 `publish\win-x64`。运行 `CodexTokenMonitor.App.exe` 后，程序进入托盘并打开监控页面。关闭浏览器标签不会退出监控器，需要从托盘菜单选择“退出”。
+
+## 当前边界
+
+第一版不监控 Codex CLI、ChatGPT 网页版、OpenAI API 或其他电脑；不读取实际订阅或 API 账单，不提供远程同步、安装器和自动更新；不会自动停止、压缩或切换 Codex 会话。页面中的费用仅为本地 token 按项目内置的自定义参考单价折算的等值成本，不是官方报价。没有内置单价的模型显示“无法计价”，不会按 0 美元处理。
+
+## 许可证
+
+本项目采用 [MIT License](LICENSE)。第三方依赖仍分别适用其各自的许可证。

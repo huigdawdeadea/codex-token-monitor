@@ -1,0 +1,43 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{CD2C4034-4040-4429-9388-62B535E9AA9F}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CodexTokenMonitor.Core", "src\CodexTokenMonitor.Core\CodexTokenMonitor.Core.csproj", "{6F3B3D49-32EE-40AA-9724-EE423D25DC77}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CodexTokenMonitor.App", "src\CodexTokenMonitor.App\CodexTokenMonitor.App.csproj", "{CDB45D0A-765D-47CB-819C-3BE147D5C830}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{399F62F5-A71F-4CCD-A0CE-75EB2F7E6475}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CodexTokenMonitor.Tests", "tests\CodexTokenMonitor.Tests\CodexTokenMonitor.Tests.csproj", "{BC56E96E-D953-47C2-AFF0-99085D393D03}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{6F3B3D49-32EE-40AA-9724-EE423D25DC77}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6F3B3D49-32EE-40AA-9724-EE423D25DC77}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6F3B3D49-32EE-40AA-9724-EE423D25DC77}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6F3B3D49-32EE-40AA-9724-EE423D25DC77}.Release|Any CPU.Build.0 = Release|Any CPU
+		{CDB45D0A-765D-47CB-819C-3BE147D5C830}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{CDB45D0A-765D-47CB-819C-3BE147D5C830}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{CDB45D0A-765D-47CB-819C-3BE147D5C830}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{CDB45D0A-765D-47CB-819C-3BE147D5C830}.Release|Any CPU.Build.0 = Release|Any CPU
+		{BC56E96E-D953-47C2-AFF0-99085D393D03}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{BC56E96E-D953-47C2-AFF0-99085D393D03}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{BC56E96E-D953-47C2-AFF0-99085D393D03}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{BC56E96E-D953-47C2-AFF0-99085D393D03}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{6F3B3D49-32EE-40AA-9724-EE423D25DC77} = {CD2C4034-4040-4429-9388-62B535E9AA9F}
+		{CDB45D0A-765D-47CB-819C-3BE147D5C830} = {CD2C4034-4040-4429-9388-62B535E9AA9F}
+		{BC56E96E-D953-47C2-AFF0-99085D393D03} = {399F62F5-A71F-4CCD-A0CE-75EB2F7E6475}
+	EndGlobalSection
+EndGlobal
