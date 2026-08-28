@@ -17,6 +17,7 @@ public sealed class DashboardDisplayContractTests
             "src", "CodexTokenMonitor.App", "Program.cs"));
         var tray = File.ReadAllText(FindRepositoryFile(
             "src", "CodexTokenMonitor.App", "TrayApplicationContext.cs"));
+        var publish = File.ReadAllText(FindRepositoryFile("scripts", "Publish.ps1"));
 
         Assert.Contains("会话累计处理量", script, StringComparison.Ordinal);
         Assert.Contains("不等于当前上下文占用", script, StringComparison.Ordinal);
@@ -47,6 +48,12 @@ public sealed class DashboardDisplayContractTests
         Assert.Contains("/api/sessions/{sessionId}/questions", server, StringComparison.Ordinal);
         Assert.Contains("UsageCostEstimator.EstimateModel", server, StringComparison.Ordinal);
         Assert.Contains(".session-cost-line", styles, StringComparison.Ordinal);
+        Assert.Contains("class=\"overview-snapshot\"", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("class=\"hero-card\"", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("style=\"", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("page-kicker", markup, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIVE MONITOR", script, StringComparison.Ordinal);
+        Assert.Contains("function widthLevel(percent)", script, StringComparison.Ordinal);
         Assert.Contains(".question-detail-row", styles, StringComparison.Ordinal);
         Assert.Contains(".question-token-grid", styles, StringComparison.Ordinal);
         Assert.Contains("最近 14 天", script, StringComparison.Ordinal);
@@ -124,6 +131,9 @@ public sealed class DashboardDisplayContractTests
         Assert.Contains("ForcedExitDelay", tray, StringComparison.Ordinal);
         Assert.Contains("Environment.Exit(0)", tray, StringComparison.Ordinal);
         Assert.Contains("exit.Click += (_, _) => ExitFromTray();", tray, StringComparison.Ordinal);
+        Assert.Contains("if ($LASTEXITCODE -ne 0)", publish, StringComparison.Ordinal);
+        Assert.Contains("Release tests failed", publish, StringComparison.Ordinal);
+        Assert.Contains("Release publish failed", publish, StringComparison.Ordinal);
         Assert.DoesNotContain("class=\"eyebrow\"", markup, StringComparison.Ordinal);
         Assert.DoesNotContain("class=\"eyebrow\"", script, StringComparison.Ordinal);
         Assert.DoesNotContain("SESSION CONTROL ROOM", markup, StringComparison.Ordinal);

@@ -117,6 +117,10 @@ function pressureMessage(value) {
   return "当前上下文估算仍在舒适区。";
 }
 
+function widthLevel(percent) {
+  return Math.max(0, Math.min(20, Math.round(Number(percent || 0) / 5)));
+}
+
 function visibleSessionName(session) {
   return privacyMask ? String(session.sessionId).slice(0, 8) : session.displayName;
 }
@@ -160,23 +164,18 @@ function renderOverview() {
       <div class="health-copy"><span class="status-dot"></span><strong>${data.health.status === "healthy" ? "只读采集正常" : "采集状态需要检查"}</strong><span>${data.activeCount} 个活动会话</span></div>
       <div class="health-meta">最近成功 ${formatTime(data.health.lastSuccessfulScanAt)}</div>
     </div>
-    <div class="hero-grid">
-      <article class="hero-card">
-        <div class="hero-label">最近活动会话</div>
-        <div class="hero-title">${escapeHtml(visibleSessionName(session))}</div>
-        <div class="hero-total"><strong>${formatTokens(session.totalUsage.totalTokens)}</strong><span>会话累计处理量</span></div>
-        <p class="hero-total-note">包含该会话历次调用，不等于当前上下文占用。</p>
-        <div class="hero-foot">
-          <span class="tag ${session.isActive ? "live" : ""}">${session.isActive ? "活动" : "静止"}</span>
-          <span class="tag">${escapeHtml(session.model)}</span>
-          <span class="tag">reasoning ${escapeHtml(session.reasoningEffort)}</span>
-        </div>
+    <div class="overview-snapshot">
+      <article class="context-panel ${pressureClass(pressureValue)}">
+        <div class="context-panel-head"><div><span>当前上下文估算</span><h2>${pressure == null ? "暂无数据" : `${pressure}%`}</h2></div><span class="estimate-badge">估算值</span></div>
+        <div class="context-progress" role="img" aria-label="当前上下文估算 ${pressure ?? 0}%"><i class="analysis-share-level-${widthLevel(pressureValue)}"></i></div>
+        <div class="context-meta"><strong>${formatExact(latest.totalTokens)}</strong><span>/ ${formatExact(session.modelContextWindow)} token</span></div>
+        <p>${pressureMessage(pressure)} 会话累计处理量包含历次调用，不等于当前上下文占用。</p>
       </article>
-      <article class="context-card">
-        <div class="context-heading"><h3>当前上下文估算</h3><span class="estimate-badge">估算</span></div>
-        <div class="pressure-ring ${pressureClass(pressureValue)}" style="--pressure:${Math.min(pressureValue, 100) * 3.6}deg"><div class="pressure-value"><strong>${pressure == null ? "--" : `${pressure}%`}</strong><small>${formatExact(latest.totalTokens)} / ${formatExact(session.modelContextWindow)}</small></div></div>
-        <p class="pressure-message">${pressureMessage(pressure)}</p>
-      </article>
+      <aside class="overview-status-panel" aria-label="采集摘要">
+        <div><span>活动会话</span><strong>${data.activeCount}</strong><small>当前活动窗口内</small></div>
+        <div><span>已索引会话</span><strong>${data.totalSessions}</strong><small>本地只读统计</small></div>
+        <div class="overview-status-wide"><span>最近活动</span><strong>${formatTime(session.lastActivityAt)}</strong><small>${escapeHtml(session.model)} · reasoning ${escapeHtml(session.reasoningEffort)}</small></div>
+      </aside>
     </div>
     <div class="metric-grid">
       ${metricCard("累计输入", session.totalUsage.inputTokens, `缓存细分 ${formatTokens(session.totalUsage.cachedInputTokens)}`)}
@@ -184,8 +183,8 @@ function renderOverview() {
       ${metricCard("当前上下文估算 token", latest.totalTokens, `输入 ${formatTokens(latest.inputTokens)} · 输出 ${formatTokens(latest.outputTokens)}`)}
       ${metricCard("模型上下文窗口", session.modelContextWindow, "当前上下文估算值的上限")}
     </div>
-    <div class="subsection-head"><div><h3>最近会话</h3></div><p>静止不代表已经结束</p></div>
-    <div class="session-cards">${data.sessions.slice(1, 7).map(sessionCard).join("") || '<div class="empty-state">暂无其他会话</div>'}</div>`;
+    <div class="subsection-head"><div><span class="section-number">02</span><h3>最近会话</h3></div><p>按最后活动时间排列 · 静止不代表已经结束</p></div>
+    <div class="session-cards">${data.sessions.slice(0, 6).map(sessionCard).join("") || '<div class="empty-state">暂无会话</div>'}</div>`;
 }
 
 function metricCard(label, value, note) {
@@ -195,7 +194,7 @@ function metricCard(label, value, note) {
 function sessionCard(session) {
   const pressure = session.estimatedContextPercent ?? 0;
   const cost = session.cost?.isPriced ? formatUsd(session.cost.estimatedCostUsd) : "无法计价";
-  return `<article class="session-card"><div class="session-card-top"><span class="state-pill ${session.isActive ? "active" : ""}">${session.isActive ? "活动" : "静止"}</span><small>${formatTime(session.lastActivityAt)}</small></div><div class="session-name">${escapeHtml(visibleSessionName(session))}</div><strong>${formatTokens(session.totalUsage.totalTokens)}</strong><small>累计处理量 · 当前上下文 ${session.estimatedContextPercent ?? "--"}%</small><div class="session-cost-line"><span>${escapeHtml(session.model)}</span><b>${cost}</b></div><div class="mini-pressure"><i style="width:${Math.min(pressure, 100)}%"></i></div><button class="detail-link" type="button" data-action="details" data-session-id="${escapeHtml(session.sessionId)}">查看详情</button></article>`;
+  return `<article class="session-card"><div class="session-card-top"><span class="state-pill ${session.isActive ? "active" : ""}">${session.isActive ? "活动" : "静止"}</span><small>${formatTime(session.lastActivityAt)}</small></div><div class="session-name">${escapeHtml(visibleSessionName(session))}</div><strong>${formatTokens(session.totalUsage.totalTokens)}</strong><small>累计处理量 · 当前上下文 ${session.estimatedContextPercent ?? "--"}%</small><div class="session-cost-line"><span>${escapeHtml(session.model)}</span><b>${cost}</b></div><div class="mini-pressure ${pressureClass(pressure)}"><i class="analysis-share-level-${widthLevel(pressure)}"></i></div><button class="detail-link" type="button" data-action="details" data-session-id="${escapeHtml(session.sessionId)}">查看详情</button></article>`;
 }
 
 function renderSessions() {
@@ -284,7 +283,7 @@ function renderSessionDetail() {
       <article class="detail-context-card">
         <div><span>当前上下文估算</span><strong>${pressure == null ? "--" : `${pressure}%`}</strong></div>
         <p>${formatExact(session.lastUsage.totalTokens)} / ${formatExact(session.modelContextWindow)} token</p>
-        <div class="detail-pressure ${pressureClass(pressureValue)}"><i style="width:${Math.min(pressureValue, 100)}%"></i></div>
+        <div class="detail-pressure ${pressureClass(pressureValue)}"><i class="analysis-share-level-${widthLevel(pressureValue)}"></i></div>
         <small>输入 ${formatExact(session.lastUsage.inputTokens)} · 输出 ${formatExact(session.lastUsage.outputTokens)}</small>
       </article>
     </div>
@@ -407,12 +406,13 @@ function renderModels() {
     const output = model.outputTokens || 0;
     const cached = model.cachedInputTokens || 0;
     const denominator = Math.max(input + output, 1);
-    const inputShare = Math.max(2, input / denominator * 100);
-    const outputShare = Math.max(1, output / denominator * 100);
+    const inputShare = input / denominator * 100;
+    const inputLevel = widthLevel(inputShare);
+    const outputLevel = 20 - inputLevel;
     const scale = model.totalTokens / maximum * 100;
     return `<article class="model-card">
       <div class="model-head"><div><h3>${escapeHtml(model.model)}</h3><p>${model.sessionCount} 个会话 · 占最高模型 ${scale.toFixed(0)}%</p></div><div class="model-total"><strong>${formatTokens(model.totalTokens)}</strong><small>累计 token</small></div></div>
-      <div class="share-track" title="输入与输出构成"><i style="width:${inputShare}%"></i><i style="width:${outputShare}%"></i></div>
+      <div class="share-track" title="输入与输出构成" role="img" aria-label="输入 ${inputShare.toFixed(1)}%，输出 ${(100 - inputShare).toFixed(1)}%"><i class="analysis-share-level-${inputLevel}"></i><i class="analysis-share-level-${outputLevel}"></i></div>
       <div class="model-stats"><div><span>会话中位数</span><strong>${formatTokens(model.medianTokens)}</strong></div><div><span>缓存输入细分</span><strong>${formatTokens(cached)}</strong></div><div><span>推理输出细分</span><strong>${formatTokens(model.reasoningOutputTokens)}</strong></div></div>
       <details><summary>展开 reasoning effort</summary>${model.reasoning.map((item) => `<div class="reasoning-row"><span>${escapeHtml(item.reasoningEffort)}</span><span>${item.sessionCount} 会话</span><strong>${formatTokens(item.totalTokens)}</strong></div>`).join("")}</details>
     </article>`;
