@@ -3,6 +3,31 @@ namespace CodexTokenMonitor.Tests;
 public sealed class DashboardDisplayContractTests
 {
     [Fact]
+    public void Dashboard_UsesDesktopProfessionalConsoleLayout()
+    {
+        var script = File.ReadAllText(FindRepositoryFile(
+            "src", "CodexTokenMonitor.App", "wwwroot", "app.js"));
+        var markup = File.ReadAllText(FindRepositoryFile(
+            "src", "CodexTokenMonitor.App", "wwwroot", "index.html"));
+        var styles = File.ReadAllText(FindRepositoryFile(
+            "src", "CodexTokenMonitor.App", "wwwroot", "styles.css"));
+
+        Assert.Contains("class=\"app-shell desktop-console\"", markup, StringComparison.Ordinal);
+        Assert.Contains("id=\"page-path\"", markup, StringComparison.Ordinal);
+        Assert.Contains("本机只读监控", markup, StringComparison.Ordinal);
+        Assert.Contains("今天的消耗，先看压力", script, StringComparison.Ordinal);
+        Assert.Contains("每天用了多少，一眼看清", script, StringComparison.Ordinal);
+        Assert.Contains("同一口径，对比模型消耗", script, StringComparison.Ordinal);
+        Assert.Contains("class=\"overview-today-panel\"", script, StringComparison.Ordinal);
+        Assert.Contains("class=\"overview-live-panel\"", script, StringComparison.Ordinal);
+        Assert.Contains("html { min-width: 1180px;", styles, StringComparison.Ordinal);
+        Assert.Contains("grid-template-columns: minmax(360px, 1.3fr) minmax(245px, 0.8fr) minmax(220px, 0.7fr)", styles, StringComparison.Ordinal);
+        Assert.DoesNotContain("@media (max-width: 760px)", styles, StringComparison.Ordinal);
+        Assert.DoesNotContain("@media (max-width: 480px)", styles, StringComparison.Ordinal);
+        Assert.DoesNotContain(".app-shell { display: block;", styles, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Overview_DistinguishesCumulativeUsageFromCurrentContext()
     {
         var script = File.ReadAllText(FindRepositoryFile(

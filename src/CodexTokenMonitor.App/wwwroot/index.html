@@ -10,22 +10,23 @@
 <body>
   <div class="ambient ambient-one"></div>
   <div class="ambient ambient-two"></div>
-  <div class="app-shell">
+  <div class="app-shell desktop-console">
     <aside class="sidebar">
       <a class="brand" href="#overview" aria-label="Codex Token Monitor 首页">
         <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
         <span>
           <strong>Token Monitor</strong>
+          <small>本机只读监控</small>
         </span>
       </a>
 
       <nav class="nav" aria-label="主导航">
-        <button class="nav-item active" data-view="overview"><span>01</span>当前态势</button>
-        <button class="nav-item" data-view="usage"><span>02</span>用量统计</button>
-        <button class="nav-item" data-view="sessions"><span>03</span>会话账本</button>
-        <button class="nav-item" data-view="models"><span>04</span>模型对比</button>
-        <button class="nav-item" data-view="rankings"><span>05</span>消耗排行</button>
-        <button class="nav-item" data-view="settings"><span>06</span>监控设置</button>
+        <button class="nav-item active" data-view="overview"><span>01</span><b>当前态势</b><i aria-hidden="true"></i></button>
+        <button class="nav-item" data-view="usage"><span>02</span><b>用量统计</b><i aria-hidden="true"></i></button>
+        <button class="nav-item" data-view="sessions"><span>03</span><b>会话账本</b><i aria-hidden="true"></i></button>
+        <button class="nav-item" data-view="models"><span>04</span><b>模型对比</b><i aria-hidden="true"></i></button>
+        <button class="nav-item" data-view="rankings"><span>05</span><b>消耗排行</b><i aria-hidden="true"></i></button>
+        <button class="nav-item" data-view="settings"><span>06</span><b>监控设置</b><i aria-hidden="true"></i></button>
       </nav>
 
       <div class="sidebar-status" id="sidebar-status">
@@ -37,11 +38,12 @@
     <main class="main">
       <header class="topbar">
         <div>
-          <h1 id="page-title">当前态势</h1>
+          <p class="page-path" id="page-path">本机监控 / 当前态势</p>
+          <h1 id="page-title">今天的消耗，先看压力</h1>
         </div>
         <div class="topbar-actions">
           <span class="last-update" id="last-update">尚未更新</span>
-          <button class="icon-button" id="refresh-button" title="立即刷新" aria-label="立即刷新">↻</button>
+          <button class="icon-button" id="refresh-button" title="立即刷新">立即刷新</button>
         </div>
       </header>
 

@@ -21,13 +21,22 @@ const state = {
 
 const privacyMask = new URLSearchParams(window.location.search).get("mask") === "1";
 
-const titles = {
+const viewLabels = {
   overview: "当前态势",
   usage: "用量统计",
   sessions: "会话账本",
   models: "模型对比",
   rankings: "消耗排行",
   settings: "监控设置"
+};
+
+const pageHeadlines = {
+  overview: "今天的消耗，先看压力",
+  usage: "每天用了多少，一眼看清",
+  sessions: "每个会话，各算各的",
+  models: "同一口径，对比模型消耗",
+  rankings: "消耗集中在哪里",
+  settings: "监控范围，由你掌控"
 };
 
 const taskTypeLabels = {
@@ -158,6 +167,15 @@ function renderOverview() {
   const pressure = session.estimatedContextPercent;
   const pressureValue = pressure ?? 0;
   const latest = session.lastUsage;
+  const today = state.usage?.today;
+  const todayUsage = today?.usage || { totalTokens: 0, inputTokens: 0, outputTokens: 0 };
+  const activeSessions = data.sessions.filter((item) => item.isActive).slice(0, 3);
+  const recentSevenDays = (state.usage?.days || []).slice(-7).reduce((total, day) => total + Number(day.usage.totalTokens || 0), 0);
+  const weeklyEstimate = state.usage?.costEstimate?.weekly;
+  const selectedAnalysis = state.usageAnalysis;
+  const annotationCoverage = selectedAnalysis?.selected.sessionCount > 0
+    ? selectedAnalysis.annotatedSessionCount / selectedAnalysis.selected.sessionCount * 100
+    : 0;
   root.className = "";
   root.innerHTML = `
     <div class="health-strip">
@@ -166,29 +184,41 @@ function renderOverview() {
     </div>
     <div class="overview-snapshot">
       <article class="context-panel ${pressureClass(pressureValue)}">
-        <div class="context-panel-head"><div><span>当前上下文估算</span><h2>${pressure == null ? "暂无数据" : `${pressure}%`}</h2></div><span class="estimate-badge">估算值</span></div>
+        <div class="context-panel-head"><div><span>当前上下文压力</span><h2>${pressure == null ? "暂无数据" : `${pressure}%`}</h2></div><span class="estimate-badge">估算值</span></div>
         <div class="context-progress" role="img" aria-label="当前上下文估算 ${pressure ?? 0}%"><i class="analysis-share-level-${widthLevel(pressureValue)}"></i></div>
-        <div class="context-meta"><strong>${formatExact(latest.totalTokens)}</strong><span>/ ${formatExact(session.modelContextWindow)} token</span></div>
+        <div class="context-meta"><strong>${formatExact(latest.totalTokens)}</strong><span>/ ${formatExact(session.modelContextWindow)} token · 当前上下文估算 token / 模型窗口</span></div>
         <p>${pressureMessage(pressure)} 会话累计处理量包含历次调用，不等于当前上下文占用。</p>
       </article>
-      <aside class="overview-status-panel" aria-label="采集摘要">
-        <div><span>活动会话</span><strong>${data.activeCount}</strong><small>当前活动窗口内</small></div>
-        <div><span>已索引会话</span><strong>${data.totalSessions}</strong><small>本地只读统计</small></div>
-        <div class="overview-status-wide"><span>最近活动</span><strong>${formatTime(session.lastActivityAt)}</strong><small>${escapeHtml(session.model)} · reasoning ${escapeHtml(session.reasoningEffort)}</small></div>
+      <article class="overview-today-panel">
+        <div class="overview-panel-label"><span>今日处理量</span><small>${today ? formatUsageDate(today.date) : "本地自然日"}</small></div>
+        <strong class="overview-today-value">${formatTokens(todayUsage.totalTokens)}</strong>
+        <p>${today?.sessionCount || 0} 个会话有增量</p>
+        <div class="overview-today-split">
+          <div><span>累计输入</span><strong>${formatTokens(todayUsage.inputTokens)}</strong></div>
+          <div><span>累计输出</span><strong>${formatTokens(todayUsage.outputTokens)}</strong></div>
+        </div>
+      </article>
+      <aside class="overview-live-panel" aria-label="活动会话摘要">
+        <div class="overview-panel-label"><span>活动会话</span><small>当前活动窗口内</small></div>
+        <div class="overview-live-count"><strong>${data.activeCount}</strong><span>个正在活动</span></div>
+        <div class="overview-live-list">
+          ${activeSessions.map((item) => `<div><i></i><span>${escapeHtml(visibleSessionName(item))}</span><small>${item.estimatedContextPercent ?? "--"}%</small></div>`).join("") || '<p>当前没有活动会话</p>'}
+        </div>
       </aside>
     </div>
     <div class="metric-grid">
-      ${metricCard("累计输入", session.totalUsage.inputTokens, `缓存细分 ${formatTokens(session.totalUsage.cachedInputTokens)}`)}
-      ${metricCard("累计输出", session.totalUsage.outputTokens, `推理细分 ${formatTokens(session.totalUsage.reasoningOutputTokens)}`)}
-      ${metricCard("当前上下文估算 token", latest.totalTokens, `输入 ${formatTokens(latest.inputTokens)} · 输出 ${formatTokens(latest.outputTokens)}`)}
-      ${metricCard("模型上下文窗口", session.modelContextWindow, "当前上下文估算值的上限")}
+      ${metricCard("已索引会话", data.totalSessions, "本地只读统计")}
+      ${metricCard("最近 7 天", recentSevenDays, "调用级事件合计")}
+      ${metricCard("API 等值参考成本", weeklyEstimate?.estimatedCostUsd == null ? "--" : formatUsd(weeklyEstimate.estimatedCostUsd), "不是实际账单", "accent")}
+      ${metricCard("已标记任务覆盖率", `${annotationCoverage.toFixed(0)}%`, "完成、返工与结果")}
     </div>
     <div class="subsection-head"><div><span class="section-number">02</span><h3>最近会话</h3></div><p>按最后活动时间排列 · 静止不代表已经结束</p></div>
     <div class="session-cards">${data.sessions.slice(0, 6).map(sessionCard).join("") || '<div class="empty-state">暂无会话</div>'}</div>`;
 }
 
-function metricCard(label, value, note) {
-  return `<article class="metric-card"><span>${escapeHtml(label)}</span><strong>${formatTokens(value)}</strong><small>${escapeHtml(note)}</small></article>`;
+function metricCard(label, value, note, tone = "") {
+  const displayValue = typeof value === "number" ? formatTokens(value) : escapeHtml(value);
+  return `<article class="metric-card ${escapeHtml(tone)}"><span>${escapeHtml(label)}</span><strong>${displayValue}</strong><small>${escapeHtml(note)}</small></article>`;
 }
 
 function sessionCard(session) {
@@ -811,7 +841,8 @@ async function selectUsageDate(date) {
 
 function switchView(view) {
   state.view = view;
-  $("#page-title").textContent = titles[view];
+  $("#page-title").textContent = pageHeadlines[view];
+  $("#page-path").textContent = `本机监控 / ${viewLabels[view]}`;
   $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === view));
   $$(".view").forEach((item) => item.classList.toggle("active", item.id === `view-${view}`));
   window.location.hash = view;
@@ -922,7 +953,7 @@ async function initialize() {
     $("#clear-titles").addEventListener("click", () => destructiveAction("/api/titles", "清除监控数据库中的全部会话标题？token 数字不会删除。", "标题已清除"));
     $("#clear-history").addEventListener("click", () => destructiveAction("/api/history", "清除监控器保存的全部会话历史？Codex 原始文件不会删除。", "监控历史已清除"));
     const initialView = window.location.hash.slice(1);
-    switchView(titles[initialView] ? initialView : "overview");
+    switchView(viewLabels[initialView] ? initialView : "overview");
     await refreshAll();
     window.setInterval(refreshAll, 3000);
   } catch (error) {
