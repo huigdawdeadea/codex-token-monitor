@@ -61,6 +61,64 @@ public sealed class RolloutEventParserTests
         Assert.Null(errorCode);
         Assert.Equal(temporary.Path, metadata.ProjectPath);
         Assert.Equal(new DirectoryInfo(temporary.Path).Name, metadata.ProjectName);
+        Assert.Equal("git", metadata.ProjectStatus);
+    }
+
+    [Fact]
+    public void ResolvesLinkedWorktreeToItsCommonGitRepository()
+    {
+        using var temporary = new TemporaryDirectory();
+        var repository = Directory.CreateDirectory(Path.Combine(temporary.Path, "repository"));
+        var commonGitDirectory = Directory.CreateDirectory(Path.Combine(repository.FullName, ".git"));
+        var worktreeGitDirectory = Directory.CreateDirectory(Path.Combine(commonGitDirectory.FullName, "worktrees", "feature"));
+        File.WriteAllText(Path.Combine(worktreeGitDirectory.FullName, "commondir"), "../..");
+        var worktree = Directory.CreateDirectory(Path.Combine(temporary.Path, "worktree"));
+        File.WriteAllText(Path.Combine(worktree.FullName, ".git"), $"gitdir: {worktreeGitDirectory.FullName}");
+        var child = Directory.CreateDirectory(Path.Combine(worktree.FullName, "src")).FullName;
+        var line = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
+        {
+            timestamp = "2026-08-31T01:00:00Z",
+            type = "session_meta",
+            payload = new { id = "worktree-session", cwd = child }
+        }));
+
+        var recognized = _parser.TryParse(line, out var parsed, out var errorCode);
+
+        var metadata = Assert.IsType<ParsedSessionMetadata>(parsed);
+        Assert.True(recognized);
+        Assert.Null(errorCode);
+        Assert.Equal(repository.FullName, metadata.ProjectPath);
+        Assert.Equal(repository.Name, metadata.ProjectName);
+        Assert.Equal("git", metadata.ProjectStatus);
+    }
+
+    [Fact]
+    public void DistinguishesExistingNonGitAndMissingWorkingDirectories()
+    {
+        using var temporary = new TemporaryDirectory();
+        var existing = Directory.CreateDirectory(Path.Combine(temporary.Path, "plain"));
+        var missing = Path.Combine(temporary.Path, "deleted-worktree");
+
+        ParsedSessionMetadata Parse(string sessionId, string cwd)
+        {
+            var line = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
+            {
+                timestamp = "2026-08-31T01:00:00Z",
+                type = "session_meta",
+                payload = new { id = sessionId, cwd }
+            }));
+            Assert.True(_parser.TryParse(line, out var parsed, out var errorCode));
+            Assert.Null(errorCode);
+            return Assert.IsType<ParsedSessionMetadata>(parsed);
+        }
+
+        var directoryMetadata = Parse("directory-session", existing.FullName);
+        var pendingMetadata = Parse("pending-session", missing);
+
+        Assert.Equal("directory", directoryMetadata.ProjectStatus);
+        Assert.Equal(existing.FullName, directoryMetadata.ProjectPath);
+        Assert.Equal("pending", pendingMetadata.ProjectStatus);
+        Assert.Equal(missing, pendingMetadata.ProjectPath);
     }
 
     [Fact]

@@ -19,7 +19,8 @@ internal sealed class WebDashboardServer(
     MonitorDatabase database,
     CodexSessionMonitor monitor,
     MonitorHealthTracker health,
-    StartupRegistrationService startupRegistration)
+    StartupRegistrationService startupRegistration,
+    PricingUpdateCoordinator pricingCoordinator)
 {
     private static readonly HashSet<string> TaskTypes =
     [
@@ -122,9 +123,14 @@ internal sealed class WebDashboardServer(
         {
             var settings = await database.GetSettingsAsync(cancellationToken);
             var sessions = await database.ListSessionsAsync(100, cancellationToken);
+            var costs = await database.GetSessionCostsAsync(cancellationToken);
             var now = DateTimeOffset.UtcNow;
             var activityWindow = TimeSpan.FromMinutes(settings.ActiveWindowMinutes);
-            var projected = sessions.Select(session => ProjectSession(session, now, activityWindow)).ToArray();
+            var projected = sessions.Select(session => ProjectSession(
+                session,
+                costs.GetValueOrDefault(session.SessionId),
+                now,
+                activityWindow)).ToArray();
             return Results.Ok(new
             {
                 generatedAt = now,
@@ -141,9 +147,14 @@ internal sealed class WebDashboardServer(
         {
             var settings = await database.GetSettingsAsync(cancellationToken);
             var sessions = await database.ListSessionsAsync(1000, cancellationToken);
+            var costs = await database.GetSessionCostsAsync(cancellationToken);
             var now = DateTimeOffset.UtcNow;
             var window = TimeSpan.FromMinutes(settings.ActiveWindowMinutes);
-            return Results.Ok(sessions.Select(session => ProjectSession(session, now, window)));
+            return Results.Ok(sessions.Select(session => ProjectSession(
+                session,
+                costs.GetValueOrDefault(session.SessionId),
+                now,
+                window)));
         });
 
         app.MapGet("/api/sessions/{sessionId}/questions", async (
@@ -207,7 +218,14 @@ internal sealed class WebDashboardServer(
             Results.Ok(await database.GetModelSummariesAsync(cancellationToken)));
 
         app.MapGet("/api/usage", async (int? days, CancellationToken cancellationToken) =>
-            Results.Ok(await database.GetUsageSummaryAsync(days ?? 14, cancellationToken)));
+        {
+            var summary = await database.GetUsageSummaryAsync(days ?? 14, cancellationToken);
+            var pricingStatus = await pricingCoordinator.GetStatusAsync(cancellationToken);
+            return Results.Ok(summary with
+            {
+                CostEstimate = summary.CostEstimate with { PricingStatus = pricingStatus }
+            });
+        });
 
         app.MapGet("/api/usage/analysis", async (string? date, CancellationToken cancellationToken) =>
         {
@@ -222,6 +240,43 @@ internal sealed class WebDashboardServer(
 
         app.MapGet("/api/rankings", async (int? limit, CancellationToken cancellationToken) =>
             Results.Ok(await database.GetUsageRankingsAsync(limit ?? 100, cancellationToken)));
+
+        app.MapGet("/api/rankings/projects/daily", async (string? date, CancellationToken cancellationToken) =>
+        {
+            var today = DateOnly.FromDateTime(DateTime.Now);
+            var selectedDate = today;
+            if (date is not null && !DateOnly.TryParseExact(date, "yyyy-MM-dd", out selectedDate))
+            {
+                return Results.BadRequest(new { error = "invalid_date" });
+            }
+
+            if (selectedDate > today)
+            {
+                return Results.BadRequest(new { error = "future_date" });
+            }
+
+            return Results.Ok(await database.GetDailyProjectUsageAsync(selectedDate, cancellationToken));
+        });
+
+        app.MapGet("/api/skills", async (
+            int? days,
+            string? confidence,
+            string? model,
+            CancellationToken cancellationToken) =>
+        {
+            var confidenceFilter = confidence is "all" or "medium" ? confidence : "high";
+            return Results.Ok(await database.GetSkillUsageSummaryAsync(
+                days ?? 0,
+                confidenceFilter,
+                string.IsNullOrWhiteSpace(model) ? null : model,
+                cancellationToken));
+        });
+
+        app.MapGet("/api/skills/{name}", async (string name, CancellationToken cancellationToken) =>
+        {
+            var detail = await database.GetSkillUsageDetailAsync(name, cancellationToken);
+            return detail is null ? Results.NotFound(new { error = "skill_not_found" }) : Results.Ok(detail);
+        });
 
         app.MapGet("/api/settings", async (CancellationToken cancellationToken) =>
             Results.Ok(await database.GetSettingsAsync(cancellationToken)));
@@ -253,6 +308,21 @@ internal sealed class WebDashboardServer(
 
             monitor.RequestRefresh();
             return Results.Accepted();
+        });
+
+        app.MapGet("/api/pricing", async (CancellationToken cancellationToken) =>
+            Results.Ok(await pricingCoordinator.GetStatusAsync(cancellationToken)));
+
+        app.MapPost("/api/pricing/refresh", async (
+            HttpRequest request,
+            CancellationToken cancellationToken) =>
+        {
+            if (!HasValidControlToken(request))
+            {
+                return Results.Unauthorized();
+            }
+
+            return Results.Ok(await pricingCoordinator.RefreshNowAsync(cancellationToken));
         });
 
         app.MapPost("/api/startup", (HttpRequest request, StartupRequest body) =>
@@ -306,6 +376,7 @@ internal sealed class WebDashboardServer(
 
     private static SessionDto ProjectSession(
         SessionSnapshot session,
+        ModelUsageCost? cost,
         DateTimeOffset now,
         TimeSpan activityWindow)
     {
@@ -319,7 +390,7 @@ internal sealed class WebDashboardServer(
             session.ReasoningEffort ?? "unknown",
             session.TotalUsage,
             session.LastUsage,
-            UsageCostEstimator.EstimateModel(model, session.TotalUsage),
+            cost ?? new ModelUsageCost(model, session.TotalUsage, 0, 0, 0m, false),
             session.ModelContextWindow,
             session.EstimatedContextPercent,
             session.LastActivityAt,

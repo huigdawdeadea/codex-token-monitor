@@ -64,7 +64,8 @@ public sealed class RolloutEventParser
                     model,
                     threadSource,
                     project.Path,
-                    project.Name);
+                    project.Name,
+                    project.Status);
                 return true;
             }
 

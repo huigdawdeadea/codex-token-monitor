@@ -14,6 +14,7 @@ public sealed class CodexSessionMonitor : IAsyncDisposable
     private readonly RolloutFileProcessor _fileProcessor;
     private readonly CodexMetadataReader _metadataReader;
     private readonly MonitorHealthTracker _health;
+    private readonly SkillUsageAnalyzer _skillUsageAnalyzer;
     private readonly TimeSpan _scanInterval;
     private readonly TimeSpan _metadataInterval;
     private readonly SemaphoreSlim _scanSignal = new(0, 1);
@@ -28,6 +29,7 @@ public sealed class CodexSessionMonitor : IAsyncDisposable
         RolloutFileProcessor fileProcessor,
         CodexMetadataReader metadataReader,
         MonitorHealthTracker health,
+        SkillUsageAnalyzer? skillUsageAnalyzer = null,
         TimeSpan? scanInterval = null,
         TimeSpan? metadataInterval = null)
     {
@@ -37,6 +39,7 @@ public sealed class CodexSessionMonitor : IAsyncDisposable
         _fileProcessor = fileProcessor;
         _metadataReader = metadataReader;
         _health = health;
+        _skillUsageAnalyzer = skillUsageAnalyzer ?? new SkillUsageAnalyzer(new SkillTokenCounter(), new RolloutEventParser());
         _scanInterval = scanInterval ?? TimeSpan.FromSeconds(5);
         _metadataInterval = metadataInterval ?? TimeSpan.FromSeconds(30);
     }
@@ -113,6 +116,7 @@ public sealed class CodexSessionMonitor : IAsyncDisposable
         while (!cancellationToken.IsCancellationRequested)
         {
             await ScanAllAsync(cancellationToken);
+            await ScanSkillUsageAsync(cancellationToken);
             if (DateTimeOffset.UtcNow >= nextMetadataRead)
             {
                 await RefreshMetadataAsync(cancellationToken);
@@ -122,6 +126,46 @@ public sealed class CodexSessionMonitor : IAsyncDisposable
             if (await _scanSignal.WaitAsync(_scanInterval, cancellationToken))
             {
                 Interlocked.Exchange(ref _refreshPending, 0);
+            }
+        }
+    }
+
+    private async Task ScanSkillUsageAsync(CancellationToken cancellationToken)
+    {
+        var definitions = await _skillUsageAnalyzer.ScanDefinitionsAsync(_codexHome, cancellationToken);
+        await _database.ReplaceSkillDefinitionsAsync(definitions, cancellationToken);
+        if (!Directory.Exists(_sessionsRoot))
+        {
+            return;
+        }
+
+        foreach (var path in Directory.EnumerateFiles(_sessionsRoot, "rollout-*.jsonl", SearchOption.AllDirectories))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                var info = new FileInfo(path);
+                if (!await _database.SkillRolloutNeedsRebuildAsync(
+                    path,
+                    info.Length,
+                    info.LastWriteTimeUtc.Ticks,
+                    SkillUsageAnalyzer.ParserVersion,
+                    cancellationToken))
+                {
+                    continue;
+                }
+
+                var analysis = await _skillUsageAnalyzer.AnalyzeRolloutAsync(path, definitions, cancellationToken);
+                await _database.ReplaceSkillRolloutAsync(analysis, SkillUsageAnalyzer.ParserVersion, cancellationToken);
+            }
+            catch (FileNotFoundException)
+            {
+            }
+            catch (IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
             }
         }
     }

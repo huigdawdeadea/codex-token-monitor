@@ -2,6 +2,7 @@ using System.Diagnostics;
 using CodexTokenMonitor.Core.Metadata;
 using CodexTokenMonitor.Core.Monitoring;
 using CodexTokenMonitor.Core.Parsing;
+using CodexTokenMonitor.Core.Pricing;
 using CodexTokenMonitor.Core.Storage;
 
 namespace CodexTokenMonitor.App;
@@ -14,6 +15,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly NotifyIcon _notifyIcon;
     private readonly Icon _icon;
     private readonly CodexSessionMonitor _monitor;
+    private readonly PricingUpdateCoordinator _pricingCoordinator;
     private readonly WebDashboardServer _webServer;
     private RegisteredWaitHandle? _activationRegistration;
     private bool _stopping;
@@ -23,11 +25,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
         NotifyIcon notifyIcon,
         Icon icon,
         CodexSessionMonitor monitor,
+        PricingUpdateCoordinator pricingCoordinator,
         WebDashboardServer webServer)
     {
         _notifyIcon = notifyIcon;
         _icon = icon;
         _monitor = monitor;
+        _pricingCoordinator = pricingCoordinator;
         _webServer = webServer;
     }
 
@@ -50,10 +54,22 @@ internal sealed class TrayApplicationContext : ApplicationContext
             new CodexMetadataReader(),
             health);
         monitor.StartAsync().GetAwaiter().GetResult();
-        var webServer = new WebDashboardServer(database, monitor, health, new StartupRegistrationService());
+        var pricingCoordinator = new PricingUpdateCoordinator(
+            database,
+            [
+                new OpenAiOfficialPriceSource(enabled: true),
+                new LiteLlmPriceSource(enabled: false)
+            ]);
+        pricingCoordinator.StartAsync().GetAwaiter().GetResult();
+        var webServer = new WebDashboardServer(
+            database,
+            monitor,
+            health,
+            new StartupRegistrationService(),
+            pricingCoordinator);
         webServer.StartAsync().GetAwaiter().GetResult();
 
-        var context = new TrayApplicationContext(notifyIcon, icon, monitor, webServer);
+        var context = new TrayApplicationContext(notifyIcon, icon, monitor, pricingCoordinator, webServer);
         webServer.UnexpectedlyStopped += context.OnWebServerUnexpectedlyStopped;
         context.BuildMenu();
         context._activationRegistration = ThreadPool.RegisterWaitForSingleObject(
@@ -91,7 +107,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _notifyIcon.Visible = false;
         try
         {
-            Task.WhenAll(_webServer.StopAsync(), _monitor.StopAsync())
+            Task.WhenAll(_webServer.StopAsync(), _pricingCoordinator.StopAsync(), _monitor.StopAsync())
                 .WaitAsync(ShutdownTimeout)
                 .GetAwaiter()
                 .GetResult();

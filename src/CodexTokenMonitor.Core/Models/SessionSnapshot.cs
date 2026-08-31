@@ -12,6 +12,7 @@ public sealed record SessionSnapshot
     public string? ReasoningEffort { get; init; }
     public string? ProjectPath { get; init; }
     public string? ProjectName { get; init; }
+    public string ProjectStatus { get; init; } = "unidentified";
     public TokenUsage TotalUsage { get; init; } = TokenUsage.Empty;
     public TokenUsage LastUsage { get; init; } = TokenUsage.Empty;
     public long ModelContextWindow { get; init; }

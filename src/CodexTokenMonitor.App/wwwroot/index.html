@@ -26,7 +26,8 @@
         <button class="nav-item" data-view="sessions"><span>03</span><b>会话账本</b><i aria-hidden="true"></i></button>
         <button class="nav-item" data-view="models"><span>04</span><b>模型对比</b><i aria-hidden="true"></i></button>
         <button class="nav-item" data-view="rankings"><span>05</span><b>消耗排行</b><i aria-hidden="true"></i></button>
-        <button class="nav-item" data-view="settings"><span>06</span><b>监控设置</b><i aria-hidden="true"></i></button>
+        <button class="nav-item" data-view="skills"><span>06</span><b>Skills 归因</b><i aria-hidden="true"></i></button>
+        <button class="nav-item" data-view="settings"><span>07</span><b>监控设置</b><i aria-hidden="true"></i></button>
       </nav>
 
       <div class="sidebar-status" id="sidebar-status">
@@ -93,7 +94,7 @@
       <section class="view" id="view-rankings" aria-labelledby="page-title">
         <div class="section-intro ranking-intro">
           <div><h2>看见消耗集中在哪里</h2></div>
-          <p>日期榜看每天增量，会话榜看单个会话累计，项目榜按会话工作目录归并。排名只表示消耗量，不代表效率高低。</p>
+          <p>日期榜看每天增量，会话榜看单个会话累计；项目榜可切换所选日期明细与历史累计。排名只表示消耗量，不代表效率高低。</p>
         </div>
         <div class="ranking-toolbar" role="group" aria-label="排行口径">
           <button class="ranking-mode active" type="button" data-ranking-mode="days" aria-pressed="true">按天排行</button>
@@ -101,6 +102,21 @@
           <button class="ranking-mode" type="button" data-ranking-mode="projects" aria-pressed="false">按项目排行</button>
         </div>
         <div id="ranking-content" class="loading-panel">正在生成 token 排行...</div>
+      </section>
+
+      <section class="view" id="view-skills" aria-labelledby="page-title">
+        <div class="section-intro">
+          <div><h2>静态体积和运行归因，分开看</h2></div>
+          <p>运行 token 是基于本地 rollout 的可审计估算，不代表移除 skill 后一定能节省的反事实成本。</p>
+        </div>
+        <div class="skills-toolbar">
+          <label>时间范围<select id="skill-days"><option value="0">全部历史</option><option value="7">最近 7 天</option><option value="30">最近 30 天</option><option value="90">最近 90 天</option></select></label>
+          <label>置信度<select id="skill-confidence"><option value="high">仅高置信度</option><option value="all">高 + 中</option><option value="medium">仅中置信度</option></select></label>
+          <label>状态<select id="skill-status"><option value="active">当前可用</option><option value="all">全部</option><option value="inactive">非活动</option></select></label>
+          <label>模型<input id="skill-model" type="search" placeholder="全部模型" autocomplete="off"></label>
+        </div>
+        <div id="skills-content" class="loading-panel">正在建立 skill 静态清单与历史归因...</div>
+        <div id="skill-detail" class="skill-detail-panel" hidden></div>
       </section>
 
       <section class="view" id="view-settings" aria-labelledby="page-title">
@@ -123,8 +139,14 @@
             <label class="switch-row"><input id="startup-enabled" type="checkbox"><span class="switch"></span><span>随 Windows 登录启动</span></label>
             <small id="startup-note">发布版验收后可启用</small>
           </article>
+          <article class="settings-card pricing-settings-card">
+            <span class="card-number">B</span><h3>价格更新</h3>
+            <p>只读取公开价格文件，不发送会话、Token 或设备数据。</p>
+            <div id="pricing-settings-status" class="pricing-settings-status">正在读取价格状态...</div>
+            <button type="button" class="secondary-button" id="pricing-refresh">立即同步官方价格</button>
+          </article>
           <article class="settings-card danger-card">
-            <span class="card-number">B</span><h3>数据清理</h3>
+            <span class="card-number">C</span><h3>数据清理</h3>
             <p>清除历史不会删除 Codex 原始文件。监控器保留当前读取断点，后续新 token 会重新建立会话。</p>
             <div class="danger-actions">
               <button type="button" class="secondary-button" id="clear-titles">清除全部标题</button>

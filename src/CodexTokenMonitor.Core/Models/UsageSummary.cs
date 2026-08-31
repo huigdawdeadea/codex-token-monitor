@@ -11,7 +11,9 @@ public sealed record ModelUsageCost(
     long UncachedInputTokens,
     long PricedTokens,
     decimal EstimatedCostUsd,
-    bool IsPriced);
+    bool IsPriced,
+    IReadOnlyList<PriceCoverageSummary>? Coverage = null,
+    bool HasBackfilledPrice = false);
 
 public sealed record UsageCostPeriod(
     DateOnly StartDate,
@@ -20,13 +22,18 @@ public sealed record UsageCostPeriod(
     long PricedTokens,
     long UnpricedTokens,
     decimal EstimatedCostUsd,
-    IReadOnlyList<ModelUsageCost> Models);
+    IReadOnlyList<ModelUsageCost> Models,
+    IReadOnlyList<PriceCoverageSummary>? Coverage = null,
+    long OfficialPricedTokens = 0,
+    decimal OfficialEstimatedCostUsd = 0m);
 
 public sealed record ModelPriceRate(
     string Model,
     decimal InputUsdPerMillion,
     decimal CachedInputUsdPerMillion,
-    decimal OutputUsdPerMillion);
+    decimal OutputUsdPerMillion,
+    string SourceKind = PriceSourceKinds.BuiltInDefault,
+    DateTimeOffset? EffectiveFrom = null);
 
 public sealed record UsageCostEstimate(
     UsageCostPeriod Daily,
@@ -35,7 +42,8 @@ public sealed record UsageCostEstimate(
     IReadOnlyList<ModelPriceRate> Rates,
     string Currency,
     DateOnly PricingAsOf,
-    DateTimeOffset CalculatedAt);
+    DateTimeOffset CalculatedAt,
+    PricingStatusSnapshot? PricingStatus = null);
 
 public sealed record UsageSummary(
     DailyUsageSummary Today,
@@ -83,6 +91,31 @@ public sealed record ProjectUsageRanking(
     decimal EstimatedCostUsd,
     long UnpricedTokens,
     DateTimeOffset LastActivityAt);
+
+public sealed record DailyProjectSessionUsage(
+    string SessionId,
+    string DisplayName,
+    string Model,
+    string ReasoningEffort,
+    TokenUsage Usage,
+    DateTimeOffset LastEventAt);
+
+public sealed record DailyProjectUsage(
+    string DisplayName,
+    string? ProjectPath,
+    string ProjectStatus,
+    TokenUsage Usage,
+    DateTimeOffset LastEventAt,
+    IReadOnlyList<DailyProjectSessionUsage> Sessions);
+
+public sealed record DailyProjectUsageBreakdown(
+    DateOnly Date,
+    DateOnly? EarliestDate,
+    DateOnly LatestDate,
+    TokenUsage Usage,
+    int SessionCount,
+    IReadOnlyList<DailyProjectUsage> Projects,
+    string TimeZoneId);
 
 public sealed record UsageRankings(
     IReadOnlyList<DailyUsageSummary> Days,

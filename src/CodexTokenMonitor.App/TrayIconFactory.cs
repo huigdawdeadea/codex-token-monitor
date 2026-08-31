@@ -6,6 +6,12 @@ internal static class TrayIconFactory
 {
     public static Icon Create()
     {
+        using var applicationIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+        if (applicationIcon is not null)
+        {
+            return (Icon)applicationIcon.Clone();
+        }
+
         using var bitmap = new Bitmap(32, 32);
         using var graphics = Graphics.FromImage(bitmap);
         graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;

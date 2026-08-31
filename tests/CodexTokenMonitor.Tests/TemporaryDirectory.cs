@@ -1,3 +1,5 @@
+using Microsoft.Data.Sqlite;
+
 namespace CodexTokenMonitor.Tests;
 
 internal sealed class TemporaryDirectory : IDisposable
@@ -12,9 +14,17 @@ internal sealed class TemporaryDirectory : IDisposable
 
     public void Dispose()
     {
-        if (Directory.Exists(Path))
+        SqliteConnection.ClearAllPools();
+        for (var attempt = 0; attempt < 5 && Directory.Exists(Path); attempt++)
         {
-            Directory.Delete(Path, recursive: true);
+            try
+            {
+                Directory.Delete(Path, recursive: true);
+            }
+            catch (IOException) when (attempt < 4)
+            {
+                Thread.Sleep(20 * (attempt + 1));
+            }
         }
     }
 }

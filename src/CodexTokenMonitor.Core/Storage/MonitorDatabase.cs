@@ -6,8 +6,9 @@ using Microsoft.Data.Sqlite;
 
 namespace CodexTokenMonitor.Core.Storage;
 
-public sealed class MonitorDatabase(string databasePath)
+public sealed partial class MonitorDatabase(string databasePath)
 {
+    private const string ProjectIdentityVersion = "2";
     private readonly string _databasePath = Path.GetFullPath(databasePath);
     private readonly SemaphoreSlim _writeGate = new(1, 1);
     private readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
@@ -31,6 +32,13 @@ public sealed class MonitorDatabase(string databasePath)
             await command.ExecuteNonQueryAsync(cancellationToken);
             await EnsureSessionProjectSchemaAsync(connection, cancellationToken);
             await EnsureTokenUsageEventsSchemaAsync(connection, cancellationToken);
+            var pricingCommand = connection.CreateCommand();
+            pricingCommand.CommandText = PricingSchemaSql;
+            await pricingCommand.ExecuteNonQueryAsync(cancellationToken);
+            await EnsurePriceChangeCandidatesSchemaAsync(connection, cancellationToken);
+            var skillCommand = connection.CreateCommand();
+            skillCommand.CommandText = SkillUsageSchemaSql;
+            await skillCommand.ExecuteNonQueryAsync(cancellationToken);
         }
         finally
         {
@@ -235,7 +243,7 @@ public sealed class MonitorDatabase(string databasePath)
 
     public Task ClearHistoryAsync(CancellationToken cancellationToken = default) =>
         ExecuteWriteAsync(
-            "DELETE FROM session_annotations; DELETE FROM token_usage_events; DELETE FROM sessions;",
+            "DELETE FROM session_annotations; DELETE FROM token_usage_events; DELETE FROM sessions; DELETE FROM skill_invocations; DELETE FROM skill_attribution_events; DELETE FROM skill_scan_checkpoints;",
             null,
             cancellationToken);
 
@@ -317,6 +325,238 @@ public sealed class MonitorDatabase(string databasePath)
             "INSERT INTO settings(key, value) VALUES('monitor', $value) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             command => command.Parameters.AddWithValue("$value", json),
             cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<string>> GetObservedModelsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT DISTINCT LOWER(TRIM(model))
+            FROM sessions
+            WHERE TRIM(COALESCE(model, '')) <> ''
+              AND LOWER(TRIM(model)) <> 'unknown'
+            ORDER BY LOWER(TRIM(model))
+            """;
+        var models = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            models.Add(reader.GetString(0));
+        }
+
+        return models;
+    }
+
+    public async Task<IReadOnlyList<ModelPriceVersion>> GetPriceVersionsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        return await ReadPriceVersionsAsync(connection, cancellationToken);
+    }
+
+    public async Task<IReadOnlyDictionary<string, ModelUsageCost>> GetSessionCostsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        return await ReadSessionCostsAsync(connection, cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<PriceSourceStatus>> GetPriceSourceStatusesAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT source_id, source_kind, display_name, source_url, enabled, gate_status,
+                   last_attempt_utc, last_success_utc, next_check_utc, last_error,
+                   last_content_hash, last_source_revision, consecutive_failures
+            FROM price_source_status
+            ORDER BY CASE source_kind
+                WHEN 'official' THEN 0
+                WHEN 'third_party_reference' THEN 1
+                ELSE 2 END, display_name
+            """;
+        var statuses = new List<PriceSourceStatus>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            statuses.Add(new PriceSourceStatus(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.GetInt32(4) == 1,
+                reader.GetString(5),
+                ParseNullableDate(reader, 6),
+                ParseNullableDate(reader, 7),
+                ParseNullableDate(reader, 8),
+                GetNullableString(reader, 9),
+                GetNullableString(reader, 10),
+                GetNullableString(reader, 11),
+                reader.GetInt32(12)));
+        }
+
+        return statuses;
+    }
+
+    public async Task<IReadOnlyList<QuarantinedPriceChange>> GetQuarantinedPriceChangesAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT source_id, model, effective_utc, input_usd_per_million,
+                   cached_input_usd_per_million, output_usd_per_million,
+                   maximum_change_ratio, matching_observations, first_observed_utc,
+                   last_observed_utc, content_hash
+            FROM price_change_candidates
+            ORDER BY last_observed_utc DESC
+            """;
+        var changes = new List<QuarantinedPriceChange>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            changes.Add(new QuarantinedPriceChange(
+                reader.GetString(0),
+                reader.GetString(1),
+                ParseDate(reader.GetString(2)),
+                ReadNullableDecimal(reader, 3),
+                ReadNullableDecimal(reader, 4),
+                ReadNullableDecimal(reader, 5),
+                decimal.Parse(reader.GetString(6), CultureInfo.InvariantCulture),
+                reader.GetInt32(7),
+                ParseDate(reader.GetString(8)),
+                ParseDate(reader.GetString(9)),
+                reader.GetString(10)));
+        }
+
+        return changes;
+    }
+
+    public async Task SavePriceSourceStatusAsync(
+        PriceSourceStatus status,
+        CancellationToken cancellationToken = default)
+    {
+        await ExecuteWriteAsync(
+            """
+            INSERT INTO price_source_status(
+                source_id, source_kind, display_name, source_url, enabled, gate_status,
+                last_attempt_utc, last_success_utc, next_check_utc, last_error,
+                last_content_hash, last_source_revision, consecutive_failures)
+            VALUES(
+                $source_id, $source_kind, $display_name, $source_url, $enabled, $gate_status,
+                $last_attempt_utc, $last_success_utc, $next_check_utc, $last_error,
+                $last_content_hash, $last_source_revision, $consecutive_failures)
+            ON CONFLICT(source_id) DO UPDATE SET
+                source_kind = excluded.source_kind,
+                display_name = excluded.display_name,
+                source_url = excluded.source_url,
+                enabled = excluded.enabled,
+                gate_status = excluded.gate_status,
+                last_attempt_utc = excluded.last_attempt_utc,
+                last_success_utc = excluded.last_success_utc,
+                next_check_utc = excluded.next_check_utc,
+                last_error = excluded.last_error,
+                last_content_hash = excluded.last_content_hash,
+                last_source_revision = excluded.last_source_revision,
+                consecutive_failures = excluded.consecutive_failures
+            """,
+            command =>
+            {
+                command.Parameters.AddWithValue("$source_id", status.SourceId);
+                command.Parameters.AddWithValue("$source_kind", status.SourceKind);
+                command.Parameters.AddWithValue("$display_name", status.DisplayName);
+                command.Parameters.AddWithValue("$source_url", status.SourceUrl);
+                command.Parameters.AddWithValue("$enabled", status.Enabled ? 1 : 0);
+                command.Parameters.AddWithValue("$gate_status", status.GateStatus);
+                AddNullable(command, "$last_attempt_utc", status.LastAttemptAt is null ? null : Format(status.LastAttemptAt.Value));
+                AddNullable(command, "$last_success_utc", status.LastSuccessAt is null ? null : Format(status.LastSuccessAt.Value));
+                AddNullable(command, "$next_check_utc", status.NextCheckAt is null ? null : Format(status.NextCheckAt.Value));
+                AddNullable(command, "$last_error", status.LastError);
+                AddNullable(command, "$last_content_hash", status.LastContentHash);
+                AddNullable(command, "$last_source_revision", status.LastSourceRevision);
+                command.Parameters.AddWithValue("$consecutive_failures", status.ConsecutiveFailures);
+            },
+            cancellationToken);
+    }
+
+    public async Task<PriceActivationResult> SaveFetchedPricesAsync(
+        PriceFetchResult fetch,
+        CancellationToken cancellationToken = default)
+    {
+        await _writeGate.WaitAsync(cancellationToken);
+        try
+        {
+            await using var connection = await OpenAsync(cancellationToken);
+            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+            var activated = 0;
+            var quarantined = 0;
+            var unchanged = 0;
+            foreach (var price in fetch.Prices
+                .OrderBy(price => price.Model, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(price => price.EffectiveFrom))
+            {
+                var latest = await ReadLatestSourcePriceAsync(
+                    connection,
+                    transaction,
+                    price.SourceId,
+                    price.Model,
+                    cancellationToken);
+                if (latest is not null &&
+                    SameRates(latest, price) &&
+                    price.EffectiveFrom >= latest.EffectiveFrom)
+                {
+                    unchanged++;
+                    continue;
+                }
+
+                var maximumChange = latest is null ? 0m : MaximumChangeRatio(latest, price);
+                var priceToActivate = price;
+                if (latest is not null && maximumChange > 0.5m)
+                {
+                    var pendingEffectiveFrom = await FindMatchingQuarantinedEffectiveFromAsync(
+                        connection,
+                        transaction,
+                        price,
+                        cancellationToken);
+                    var priceToConfirm = pendingEffectiveFrom is null
+                        ? price
+                        : price with { EffectiveFrom = pendingEffectiveFrom.Value };
+                    var confirmation = await UpsertQuarantinedPriceAsync(
+                        connection,
+                        transaction,
+                        priceToConfirm,
+                        maximumChange,
+                        cancellationToken);
+                    if (confirmation.MatchingObservations < 2)
+                    {
+                        quarantined++;
+                        continue;
+                    }
+
+                    priceToActivate = price with { EffectiveFrom = confirmation.EffectiveFrom };
+                }
+
+                await InsertPriceVersionAsync(connection, transaction, priceToActivate, cancellationToken);
+                await DeleteQuarantinedPriceAsync(
+                    connection,
+                    transaction,
+                    priceToActivate.SourceId,
+                    priceToActivate.Model,
+                    priceToActivate.EffectiveFrom,
+                    cancellationToken);
+                activated++;
+            }
+
+            await transaction.CommitAsync(cancellationToken);
+            return new PriceActivationResult(activated, quarantined, unchanged);
+        }
+        finally
+        {
+            _writeGate.Release();
+        }
     }
 
     public async Task<IReadOnlyList<ModelSummary>> GetModelSummariesAsync(
@@ -589,6 +829,7 @@ public sealed class MonitorDatabase(string databasePath)
         var projectCommand = connection.CreateCommand();
         projectCommand.CommandText = """
             SELECT
+                sessions.session_id,
                 sessions.project_path,
                 sessions.project_name,
                 COALESCE(NULLIF(TRIM(sessions.model), ''), 'unknown'),
@@ -608,14 +849,16 @@ public sealed class MonitorDatabase(string databasePath)
             while (await reader.ReadAsync(cancellationToken))
             {
                 projectRows.Add(new ProjectSessionRow(
-                    GetNullableString(reader, 0),
+                    reader.GetString(0),
                     GetNullableString(reader, 1),
-                    reader.GetString(2),
-                    ReadUsage(reader, 3),
-                    ParseDate(reader.GetString(9))));
+                    GetNullableString(reader, 2),
+                    reader.GetString(3),
+                    ReadUsage(reader, 4),
+                    ParseDate(reader.GetString(10))));
             }
         }
 
+        var sessionCosts = await ReadSessionCostsAsync(connection, cancellationToken);
         var projects = projectRows
             .GroupBy(
                 row => row.ProjectPath ?? "",
@@ -624,10 +867,8 @@ public sealed class MonitorDatabase(string databasePath)
             {
                 var usage = SumUsage(group.Select(row => row.Usage));
                 var modelCosts = group
-                    .GroupBy(row => row.Model, StringComparer.OrdinalIgnoreCase)
-                    .Select(modelGroup => UsageCostEstimator.EstimateModel(
-                        modelGroup.Key,
-                        SumUsage(modelGroup.Select(row => row.Usage))))
+                    .Select(row => sessionCosts.GetValueOrDefault(row.SessionId)
+                        ?? new ModelUsageCost(row.Model, row.Usage, 0, 0, 0m, false))
                     .ToArray();
                 return new ProjectUsageRanking(
                     group.Select(row => row.ProjectName).FirstOrDefault(name => !string.IsNullOrWhiteSpace(name))
@@ -647,6 +888,118 @@ public sealed class MonitorDatabase(string databasePath)
 
         return new UsageRankings(days, sessions, projects, TimeZoneInfo.Local.Id);
     }
+
+    public async Task<DailyProjectUsageBreakdown> GetDailyProjectUsageAsync(
+        DateOnly date,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT
+                events.session_id,
+                CASE
+                    WHEN TRIM(COALESCE(sessions.title, '')) <> '' THEN sessions.title
+                    ELSE SUBSTR(events.session_id, 1, 8)
+                END AS display_name,
+                COALESCE(NULLIF(TRIM(sessions.model), ''), 'unknown'),
+                COALESCE(NULLIF(TRIM(sessions.reasoning_effort), ''), 'unknown'),
+                sessions.project_path,
+                sessions.project_name,
+                COALESCE(NULLIF(TRIM(sessions.project_status), ''), 'unidentified'),
+                SUM(events.last_input_tokens),
+                SUM(events.last_cached_input_tokens),
+                SUM(events.last_cache_write_input_tokens),
+                SUM(events.last_output_tokens),
+                SUM(events.last_reasoning_output_tokens),
+                SUM(events.last_total_tokens),
+                MAX(events.event_utc)
+            FROM token_usage_events AS events
+            LEFT JOIN sessions ON sessions.session_id = events.session_id
+            WHERE date(events.event_utc, 'localtime') = $selected_date
+            GROUP BY events.session_id
+            HAVING SUM(events.last_total_tokens) > 0
+            ORDER BY SUM(events.last_total_tokens) DESC, MAX(events.event_utc) DESC
+            """;
+        command.Parameters.AddWithValue("$selected_date", FormatDate(date));
+        var rows = new List<DailyProjectSessionRow>();
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                rows.Add(new DailyProjectSessionRow(
+                    reader.GetString(0),
+                    reader.GetString(1),
+                    reader.GetString(2),
+                    reader.GetString(3),
+                    GetNullableString(reader, 4),
+                    GetNullableString(reader, 5),
+                    reader.GetString(6),
+                    ReadUsage(reader, 7),
+                    ParseDate(reader.GetString(13))));
+            }
+        }
+
+        var earliestCommand = connection.CreateCommand();
+        earliestCommand.CommandText = "SELECT MIN(date(event_utc, 'localtime')) FROM token_usage_events WHERE last_total_tokens > 0";
+        var earliestValue = await earliestCommand.ExecuteScalarAsync(cancellationToken);
+        var earliestDate = earliestValue is string earliestText
+            ? DateOnly.ParseExact(earliestText, "yyyy-MM-dd", CultureInfo.InvariantCulture)
+            : (DateOnly?)null;
+
+        var projects = rows
+            .GroupBy(row => row.ProjectPath ?? "", StringComparer.OrdinalIgnoreCase)
+            .Select(group =>
+            {
+                var sessions = group
+                    .OrderByDescending(row => row.Usage.TotalTokens)
+                    .ThenByDescending(row => row.LastEventAt)
+                    .Select(row => new DailyProjectSessionUsage(
+                        row.SessionId,
+                        row.DisplayName,
+                        row.Model,
+                        row.ReasoningEffort,
+                        row.Usage,
+                        row.LastEventAt))
+                    .ToArray();
+                var status = group
+                    .Select(row => row.ProjectStatus)
+                    .OrderBy(ProjectStatusOrder)
+                    .FirstOrDefault() ?? "unidentified";
+                var path = group.Select(row => row.ProjectPath).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+                var displayName = group.Select(row => row.ProjectName).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))
+                    ?? (status == "pending" ? "待归并项目" : "未识别项目");
+                return new DailyProjectUsage(
+                    displayName,
+                    path,
+                    status,
+                    SumUsage(sessions.Select(session => session.Usage)),
+                    sessions.Max(session => session.LastEventAt),
+                    sessions);
+            })
+            .OrderByDescending(project => project.Usage.TotalTokens)
+            .ThenByDescending(project => project.LastEventAt)
+            .ToArray();
+        var usage = SumUsage(projects.Select(project => project.Usage));
+        var today = DateOnly.FromDateTime(DateTimeOffset.Now.DateTime);
+
+        return new DailyProjectUsageBreakdown(
+            date,
+            earliestDate,
+            today,
+            usage,
+            rows.Count,
+            projects,
+            TimeZoneInfo.Local.Id);
+    }
+
+    private static int ProjectStatusOrder(string status) => status switch
+    {
+        "git" => 0,
+        "directory" => 1,
+        "pending" => 2,
+        _ => 3
+    };
 
     private async Task ExecuteWriteAsync(
         string sql,
@@ -703,6 +1056,7 @@ public sealed class MonitorDatabase(string databasePath)
             ReasoningEffort = previous?.ReasoningEffort,
             ProjectPath = metadata?.ProjectPath ?? previous?.ProjectPath,
             ProjectName = metadata?.ProjectName ?? previous?.ProjectName,
+            ProjectStatus = metadata?.ProjectStatus ?? previous?.ProjectStatus ?? "unidentified",
             TotalUsage = token?.TotalUsage ?? previous?.TotalUsage ?? TokenUsage.Empty,
             LastUsage = token?.LastUsage ?? previous?.LastUsage ?? TokenUsage.Empty,
             ModelContextWindow = token?.ModelContextWindow ?? previous?.ModelContextWindow ?? 0,
@@ -759,6 +1113,7 @@ public sealed class MonitorDatabase(string databasePath)
                 reasoning_effort = excluded.reasoning_effort,
                 project_path = excluded.project_path,
                 project_name = excluded.project_name,
+                project_status = excluded.project_status,
                 total_input_tokens = excluded.total_input_tokens,
                 total_cached_input_tokens = excluded.total_cached_input_tokens,
                 total_cache_write_input_tokens = excluded.total_cache_write_input_tokens,
@@ -807,17 +1162,18 @@ public sealed class MonitorDatabase(string databasePath)
         ReasoningEffort = GetNullableString(reader, 7),
         ProjectPath = GetNullableString(reader, 8),
         ProjectName = GetNullableString(reader, 9),
+        ProjectStatus = reader.GetString(10),
         TotalUsage = new TokenUsage(
-            reader.GetInt64(10), reader.GetInt64(11), reader.GetInt64(12),
-            reader.GetInt64(13), reader.GetInt64(14), reader.GetInt64(15)),
+            reader.GetInt64(11), reader.GetInt64(12), reader.GetInt64(13),
+            reader.GetInt64(14), reader.GetInt64(15), reader.GetInt64(16)),
         LastUsage = new TokenUsage(
-            reader.GetInt64(16), reader.GetInt64(17), reader.GetInt64(18),
-            reader.GetInt64(19), reader.GetInt64(20), reader.GetInt64(21)),
-        ModelContextWindow = reader.GetInt64(22),
-        IsMuted = reader.GetInt64(23) == 1,
-        DataStatus = reader.GetString(24),
-        ErrorCode = GetNullableString(reader, 25),
-        LastSuccessAt = ParseDate(reader.GetString(26))
+            reader.GetInt64(17), reader.GetInt64(18), reader.GetInt64(19),
+            reader.GetInt64(20), reader.GetInt64(21), reader.GetInt64(22)),
+        ModelContextWindow = reader.GetInt64(23),
+        IsMuted = reader.GetInt64(24) == 1,
+        DataStatus = reader.GetString(25),
+        ErrorCode = GetNullableString(reader, 26),
+        LastSuccessAt = ParseDate(reader.GetString(27))
     };
 
     private static async Task<Dictionary<string, SessionAnnotation>> ReadAnnotationsAsync(
@@ -876,6 +1232,7 @@ public sealed class MonitorDatabase(string databasePath)
         AddNullable(command, "$reasoning_effort", session.ReasoningEffort);
         AddNullable(command, "$project_path", session.ProjectPath);
         AddNullable(command, "$project_name", session.ProjectName);
+        command.Parameters.AddWithValue("$project_status", session.ProjectStatus);
         AddUsageParameters(command, "total", session.TotalUsage);
         AddUsageParameters(command, "last", session.LastUsage);
         command.Parameters.AddWithValue("$model_context_window", session.ModelContextWindow);
@@ -939,6 +1296,322 @@ public sealed class MonitorDatabase(string databasePath)
         return new DailyUsageSummary(date, ReadUsage(reader, 0), reader.GetInt32(6));
     }
 
+    private static async Task<IReadOnlyList<ModelPriceVersion>> ReadPriceVersionsAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id, source_id, model, input_usd_per_million, cached_input_usd_per_million,
+                   output_usd_per_million, source_kind, source_name, source_url,
+                   effective_utc, retrieved_utc, content_hash, source_revision,
+                   parser_version, is_backfill, created_utc
+            FROM model_price_versions
+            ORDER BY effective_utc, id
+            """;
+        var versions = new List<ModelPriceVersion>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            versions.Add(ReadPriceVersion(reader));
+        }
+
+        return versions;
+    }
+
+    private static async Task<IReadOnlyDictionary<string, ModelUsageCost>> ReadSessionCostsAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT events.session_id,
+                   COALESCE(NULLIF(TRIM(sessions.model), ''), 'unknown'),
+                   events.event_utc,
+                   events.last_input_tokens,
+                   events.last_cached_input_tokens,
+                   events.last_cache_write_input_tokens,
+                   events.last_output_tokens,
+                   events.last_reasoning_output_tokens,
+                   events.last_total_tokens
+            FROM token_usage_events AS events
+            LEFT JOIN sessions ON sessions.session_id = events.session_id
+            WHERE typeof(events.last_input_tokens) = 'integer'
+              AND typeof(events.last_cached_input_tokens) = 'integer'
+              AND typeof(events.last_cache_write_input_tokens) = 'integer'
+              AND typeof(events.last_output_tokens) = 'integer'
+              AND typeof(events.last_reasoning_output_tokens) = 'integer'
+              AND typeof(events.last_total_tokens) = 'integer'
+              AND events.last_total_tokens > 0
+            ORDER BY events.session_id, events.event_utc, events.id
+            """;
+        var rows = new Dictionary<string, List<TimedModelUsage>>(StringComparer.Ordinal);
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var sessionId = reader.GetString(0);
+                if (!rows.TryGetValue(sessionId, out var events))
+                {
+                    events = [];
+                    rows.Add(sessionId, events);
+                }
+
+                events.Add(new TimedModelUsage(
+                    reader.GetString(1),
+                    ParseDate(reader.GetString(2)),
+                    ReadUsage(reader, 3)));
+            }
+        }
+
+        var catalog = new PriceCatalog(await ReadPriceVersionsAsync(connection, cancellationToken));
+        return rows.ToDictionary(
+            pair => pair.Key,
+            pair =>
+            {
+                var first = pair.Value.Min(item => item.EventAt);
+                var last = pair.Value.Max(item => item.EventAt);
+                var period = UsageCostEstimator.EstimateTimedPeriod(
+                    DateOnly.FromDateTime(first.LocalDateTime),
+                    DateOnly.FromDateTime(last.LocalDateTime),
+                    pair.Value,
+                    catalog);
+                return period.Models.Count == 1
+                    ? period.Models[0]
+                    : new ModelUsageCost(
+                        "mixed",
+                        period.Usage,
+                        period.Models.Sum(model => model.UncachedInputTokens),
+                        period.PricedTokens,
+                        period.EstimatedCostUsd,
+                        period.PricedTokens > 0,
+                        period.Coverage,
+                        period.Models.Any(model => model.HasBackfilledPrice));
+            },
+            StringComparer.Ordinal);
+    }
+
+    private static async Task<ModelPriceVersion?> ReadLatestSourcePriceAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string sourceId,
+        string model,
+        CancellationToken cancellationToken)
+    {
+        var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT id, source_id, model, input_usd_per_million, cached_input_usd_per_million,
+                   output_usd_per_million, source_kind, source_name, source_url,
+                   effective_utc, retrieved_utc, content_hash, source_revision,
+                   parser_version, is_backfill, created_utc
+            FROM model_price_versions
+            WHERE source_id = $source_id AND model = $model COLLATE NOCASE
+            ORDER BY effective_utc DESC, retrieved_utc DESC, id DESC
+            LIMIT 1
+            """;
+        command.Parameters.AddWithValue("$source_id", sourceId);
+        command.Parameters.AddWithValue("$model", model);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) ? ReadPriceVersion(reader) : null;
+    }
+
+    private static ModelPriceVersion ReadPriceVersion(SqliteDataReader reader) => new(
+        reader.GetInt64(0),
+        reader.GetString(1),
+        reader.GetString(2),
+        ReadNullableDecimal(reader, 3),
+        ReadNullableDecimal(reader, 4),
+        ReadNullableDecimal(reader, 5),
+        reader.GetString(6),
+        reader.GetString(7),
+        reader.GetString(8),
+        ParseDate(reader.GetString(9)),
+        ParseDate(reader.GetString(10)),
+        GetNullableString(reader, 11),
+        GetNullableString(reader, 12),
+        reader.GetString(13),
+        reader.GetInt32(14) == 1,
+        ParseDate(reader.GetString(15)));
+
+    private static async Task InsertPriceVersionAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        PriceCandidate price,
+        CancellationToken cancellationToken)
+    {
+        var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT OR IGNORE INTO model_price_versions(
+                source_id, model, input_usd_per_million, cached_input_usd_per_million,
+                output_usd_per_million, source_kind, source_name, source_url,
+                effective_utc, retrieved_utc, content_hash, source_revision,
+                parser_version, is_backfill, created_utc)
+            VALUES(
+                $source_id, $model, $input, $cached_input, $output, $source_kind,
+                $source_name, $source_url, $effective_utc, $retrieved_utc,
+                $content_hash, $source_revision, $parser_version, $is_backfill, $created_utc)
+            """;
+        command.Parameters.AddWithValue("$source_id", price.SourceId);
+        command.Parameters.AddWithValue("$model", price.Model.Trim().ToLowerInvariant());
+        AddNullable(command, "$input", FormatDecimal(price.InputUsdPerMillion));
+        AddNullable(command, "$cached_input", FormatDecimal(price.CachedInputUsdPerMillion));
+        AddNullable(command, "$output", FormatDecimal(price.OutputUsdPerMillion));
+        command.Parameters.AddWithValue("$source_kind", price.SourceKind);
+        command.Parameters.AddWithValue("$source_name", price.SourceName);
+        command.Parameters.AddWithValue("$source_url", price.SourceUrl);
+        command.Parameters.AddWithValue("$effective_utc", Format(price.EffectiveFrom));
+        command.Parameters.AddWithValue("$retrieved_utc", Format(price.RetrievedAt));
+        command.Parameters.AddWithValue("$content_hash", price.ContentHash);
+        AddNullable(command, "$source_revision", price.SourceRevision);
+        command.Parameters.AddWithValue("$parser_version", price.ParserVersion);
+        command.Parameters.AddWithValue("$is_backfill", price.EffectiveFrom < price.RetrievedAt ? 1 : 0);
+        command.Parameters.AddWithValue("$created_utc", Format(DateTimeOffset.UtcNow));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static async Task<(int MatchingObservations, DateTimeOffset EffectiveFrom)> UpsertQuarantinedPriceAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        PriceCandidate price,
+        decimal maximumChange,
+        CancellationToken cancellationToken)
+    {
+        var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT INTO price_change_candidates(
+                source_id, model, effective_utc, input_usd_per_million,
+                cached_input_usd_per_million, output_usd_per_million,
+                maximum_change_ratio, matching_observations, first_observed_utc,
+                last_observed_utc, content_hash)
+            VALUES(
+                $source_id, $model, $effective_utc, $input, $cached_input, $output,
+                $maximum_change_ratio, 1, $observed_utc, $observed_utc, $content_hash)
+            ON CONFLICT(source_id, model, effective_utc) DO UPDATE SET
+                input_usd_per_million = excluded.input_usd_per_million,
+                cached_input_usd_per_million = excluded.cached_input_usd_per_million,
+                output_usd_per_million = excluded.output_usd_per_million,
+                maximum_change_ratio = excluded.maximum_change_ratio,
+                matching_observations = CASE
+                    WHEN COALESCE(price_change_candidates.input_usd_per_million, '') = COALESCE(excluded.input_usd_per_million, '')
+                     AND COALESCE(price_change_candidates.cached_input_usd_per_million, '') = COALESCE(excluded.cached_input_usd_per_million, '')
+                     AND COALESCE(price_change_candidates.output_usd_per_million, '') = COALESCE(excluded.output_usd_per_million, '')
+                    THEN price_change_candidates.matching_observations + 1
+                    ELSE 1 END,
+                first_observed_utc = CASE
+                    WHEN COALESCE(price_change_candidates.input_usd_per_million, '') = COALESCE(excluded.input_usd_per_million, '')
+                     AND COALESCE(price_change_candidates.cached_input_usd_per_million, '') = COALESCE(excluded.cached_input_usd_per_million, '')
+                     AND COALESCE(price_change_candidates.output_usd_per_million, '') = COALESCE(excluded.output_usd_per_million, '')
+                    THEN price_change_candidates.first_observed_utc
+                    ELSE excluded.first_observed_utc END,
+                last_observed_utc = excluded.last_observed_utc,
+                content_hash = excluded.content_hash
+            """;
+        command.Parameters.AddWithValue("$source_id", price.SourceId);
+        command.Parameters.AddWithValue("$model", price.Model.Trim().ToLowerInvariant());
+        command.Parameters.AddWithValue("$effective_utc", Format(price.EffectiveFrom));
+        AddNullable(command, "$input", FormatDecimal(price.InputUsdPerMillion));
+        AddNullable(command, "$cached_input", FormatDecimal(price.CachedInputUsdPerMillion));
+        AddNullable(command, "$output", FormatDecimal(price.OutputUsdPerMillion));
+        command.Parameters.AddWithValue("$maximum_change_ratio", maximumChange.ToString(CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$observed_utc", Format(price.RetrievedAt));
+        command.Parameters.AddWithValue("$content_hash", price.ContentHash);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+
+        var read = connection.CreateCommand();
+        read.Transaction = transaction;
+        read.CommandText = "SELECT matching_observations, effective_utc FROM price_change_candidates WHERE source_id = $source_id AND model = $model AND effective_utc = $effective_utc";
+        read.Parameters.AddWithValue("$source_id", price.SourceId);
+        read.Parameters.AddWithValue("$model", price.Model.Trim().ToLowerInvariant());
+        read.Parameters.AddWithValue("$effective_utc", Format(price.EffectiveFrom));
+        await using var reader = await read.ExecuteReaderAsync(cancellationToken);
+        await reader.ReadAsync(cancellationToken);
+        return (reader.GetInt32(0), ParseDate(reader.GetString(1)));
+    }
+
+    private static async Task DeleteQuarantinedPriceAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string sourceId,
+        string model,
+        DateTimeOffset effectiveFrom,
+        CancellationToken cancellationToken)
+    {
+        var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "DELETE FROM price_change_candidates WHERE source_id = $source_id AND model = $model AND effective_utc = $effective_utc";
+        command.Parameters.AddWithValue("$source_id", sourceId);
+        command.Parameters.AddWithValue("$model", model.Trim().ToLowerInvariant());
+        command.Parameters.AddWithValue("$effective_utc", Format(effectiveFrom));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static async Task<DateTimeOffset?> FindMatchingQuarantinedEffectiveFromAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        PriceCandidate price,
+        CancellationToken cancellationToken)
+    {
+        var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT effective_utc
+            FROM price_change_candidates
+            WHERE source_id = $source_id
+              AND model = $model
+              AND COALESCE(input_usd_per_million, '') = COALESCE($input, '')
+              AND COALESCE(cached_input_usd_per_million, '') = COALESCE($cached_input, '')
+              AND COALESCE(output_usd_per_million, '') = COALESCE($output, '')
+            ORDER BY first_observed_utc
+            LIMIT 1
+            """;
+        command.Parameters.AddWithValue("$source_id", price.SourceId);
+        command.Parameters.AddWithValue("$model", price.Model.Trim().ToLowerInvariant());
+        AddNullable(command, "$input", FormatDecimal(price.InputUsdPerMillion));
+        AddNullable(command, "$cached_input", FormatDecimal(price.CachedInputUsdPerMillion));
+        AddNullable(command, "$output", FormatDecimal(price.OutputUsdPerMillion));
+        var value = await command.ExecuteScalarAsync(cancellationToken) as string;
+        return value is null ? null : ParseDate(value);
+    }
+
+    private static bool SameRates(ModelPriceVersion previous, PriceCandidate current) =>
+        previous.InputUsdPerMillion == current.InputUsdPerMillion &&
+        previous.CachedInputUsdPerMillion == current.CachedInputUsdPerMillion &&
+        previous.OutputUsdPerMillion == current.OutputUsdPerMillion;
+
+    private static decimal MaximumChangeRatio(ModelPriceVersion previous, PriceCandidate current) =>
+        new[]
+        {
+            ChangeRatio(previous.InputUsdPerMillion, current.InputUsdPerMillion),
+            ChangeRatio(previous.CachedInputUsdPerMillion, current.CachedInputUsdPerMillion),
+            ChangeRatio(previous.OutputUsdPerMillion, current.OutputUsdPerMillion)
+        }.Max();
+
+    private static decimal ChangeRatio(decimal? previous, decimal? current)
+    {
+        if (previous == current)
+        {
+            return 0m;
+        }
+
+        if (previous is null || current is null || previous == 0m)
+        {
+            return 1m;
+        }
+
+        return Math.Abs(current.Value - previous.Value) / previous.Value;
+    }
+
+    private static string? FormatDecimal(decimal? value) =>
+        value?.ToString(CultureInfo.InvariantCulture);
+
+    private static decimal? ReadNullableDecimal(SqliteDataReader reader, int ordinal) =>
+        reader.IsDBNull(ordinal)
+            ? null
+            : decimal.Parse(reader.GetString(ordinal), CultureInfo.InvariantCulture);
+
     private static string Format(DateTimeOffset value) =>
         value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
 
@@ -978,21 +1651,28 @@ public sealed class MonitorDatabase(string databasePath)
         var daysSinceMonday = ((int)today.DayOfWeek + 6) % 7;
         var weekStart = today.AddDays(-daysSinceMonday);
         var monthStart = new DateOnly(today.Year, today.Month, 1);
-        var dailyUsage = await ReadModelUsageAsync(connection, today, today, cancellationToken);
-        var weeklyUsage = await ReadModelUsageAsync(connection, weekStart, today, cancellationToken);
-        var monthlyUsage = await ReadModelUsageAsync(connection, monthStart, today, cancellationToken);
+        var catalog = new PriceCatalog(await ReadPriceVersionsAsync(connection, cancellationToken));
+        var dailyUsage = await ReadTimedModelUsageAsync(connection, today, today, cancellationToken);
+        var weeklyUsage = await ReadTimedModelUsageAsync(connection, weekStart, today, cancellationToken);
+        var monthlyUsage = await ReadTimedModelUsageAsync(connection, monthStart, today, cancellationToken);
+        var currentRates = catalog.GetCurrentRates(calculatedAt);
+        var latestEffective = currentRates
+            .Where(rate => rate.EffectiveFrom is not null)
+            .Select(rate => rate.EffectiveFrom!.Value)
+            .DefaultIfEmpty(UsageCostEstimator.PricingAsOf.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc))
+            .Max();
 
         return new UsageCostEstimate(
-            UsageCostEstimator.EstimatePeriod(today, today, dailyUsage),
-            UsageCostEstimator.EstimatePeriod(weekStart, today, weeklyUsage),
-            UsageCostEstimator.EstimatePeriod(monthStart, today, monthlyUsage),
-            UsageCostEstimator.Rates,
+            UsageCostEstimator.EstimateTimedPeriod(today, today, dailyUsage, catalog),
+            UsageCostEstimator.EstimateTimedPeriod(weekStart, today, weeklyUsage, catalog),
+            UsageCostEstimator.EstimateTimedPeriod(monthStart, today, monthlyUsage, catalog),
+            currentRates,
             "USD",
-            UsageCostEstimator.PricingAsOf,
+            DateOnly.FromDateTime(latestEffective.UtcDateTime),
             calculatedAt);
     }
 
-    private static async Task<IReadOnlyList<(string Model, TokenUsage Usage)>> ReadModelUsageAsync(
+    private static async Task<IReadOnlyList<TimedModelUsage>> ReadTimedModelUsageAsync(
         SqliteConnection connection,
         DateOnly startDate,
         DateOnly endDate,
@@ -1002,26 +1682,33 @@ public sealed class MonitorDatabase(string databasePath)
         command.CommandText = """
             SELECT
                 COALESCE(NULLIF(TRIM(sessions.model), ''), 'unknown'),
-                SUM(events.last_input_tokens),
-                SUM(events.last_cached_input_tokens),
-                SUM(events.last_cache_write_input_tokens),
-                SUM(events.last_output_tokens),
-                SUM(events.last_reasoning_output_tokens),
-                SUM(events.last_total_tokens)
+                events.event_utc,
+                events.last_input_tokens,
+                events.last_cached_input_tokens,
+                events.last_cache_write_input_tokens,
+                events.last_output_tokens,
+                events.last_reasoning_output_tokens,
+                events.last_total_tokens
             FROM token_usage_events AS events
             LEFT JOIN sessions ON sessions.session_id = events.session_id
             WHERE date(events.event_utc, 'localtime') >= $start_date
               AND date(events.event_utc, 'localtime') <= $end_date
-            GROUP BY COALESCE(NULLIF(TRIM(sessions.model), ''), 'unknown')
-            HAVING SUM(events.last_total_tokens) > 0
+              AND typeof(events.last_input_tokens) = 'integer'
+              AND typeof(events.last_cached_input_tokens) = 'integer'
+              AND typeof(events.last_cache_write_input_tokens) = 'integer'
+              AND typeof(events.last_output_tokens) = 'integer'
+              AND typeof(events.last_reasoning_output_tokens) = 'integer'
+              AND typeof(events.last_total_tokens) = 'integer'
+              AND events.last_total_tokens > 0
+            ORDER BY events.event_utc, events.id
             """;
         command.Parameters.AddWithValue("$start_date", FormatDate(startDate));
         command.Parameters.AddWithValue("$end_date", FormatDate(endDate));
-        var result = new List<(string Model, TokenUsage Usage)>();
+        var result = new List<TimedModelUsage>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            result.Add((reader.GetString(0), ReadUsage(reader, 1)));
+            result.Add(new TimedModelUsage(reader.GetString(0), ParseDate(reader.GetString(1)), ReadUsage(reader, 2)));
         }
 
         return result;
@@ -1035,8 +1722,30 @@ public sealed class MonitorDatabase(string databasePath)
     {
         IReadOnlyList<ParsedTokenEvent> events = result.TokenEvents ??
             (result.LatestTokenEvent is null ? [] : [result.LatestTokenEvent]);
+        TokenUsage? previousTotal = null;
+        var previousCommand = connection.CreateCommand();
+        previousCommand.Transaction = transaction;
+        previousCommand.CommandText = """
+            SELECT input_tokens, cached_input_tokens, cache_write_input_tokens,
+                   output_tokens, reasoning_output_tokens, total_tokens
+            FROM token_usage_events WHERE rollout_path=$path ORDER BY id DESC LIMIT 1
+            """;
+        previousCommand.Parameters.AddWithValue("$path", result.Path);
+        await using (var previousReader = await previousCommand.ExecuteReaderAsync(cancellationToken))
+        {
+            if (await previousReader.ReadAsync(cancellationToken))
+            {
+                previousTotal = ReadUsage(previousReader, 0);
+            }
+        }
+
         foreach (var tokenEvent in events)
         {
+            if (previousTotal == tokenEvent.TotalUsage)
+            {
+                continue;
+            }
+
             var command = connection.CreateCommand();
             command.Transaction = transaction;
             command.CommandText = """
@@ -1059,6 +1768,7 @@ public sealed class MonitorDatabase(string databasePath)
             AddUsageParameters(command, "event", tokenEvent.TotalUsage);
             AddUsageParameters(command, "last", tokenEvent.LastUsage);
             await command.ExecuteNonQueryAsync(cancellationToken);
+            previousTotal = tokenEvent.TotalUsage;
         }
     }
 
@@ -1104,13 +1814,13 @@ public sealed class MonitorDatabase(string databasePath)
             }
         }
 
-        var addedProjectColumns = false;
+        var requiresProjectRescan = false;
         if (!columns.Contains("project_path"))
         {
             var addPath = connection.CreateCommand();
             addPath.CommandText = "ALTER TABLE sessions ADD COLUMN project_path TEXT NULL";
             await addPath.ExecuteNonQueryAsync(cancellationToken);
-            addedProjectColumns = true;
+            requiresProjectRescan = true;
         }
 
         if (!columns.Contains("project_name"))
@@ -1118,27 +1828,130 @@ public sealed class MonitorDatabase(string databasePath)
             var addName = connection.CreateCommand();
             addName.CommandText = "ALTER TABLE sessions ADD COLUMN project_name TEXT NULL";
             await addName.ExecuteNonQueryAsync(cancellationToken);
-            addedProjectColumns = true;
+            requiresProjectRescan = true;
         }
 
-        if (addedProjectColumns)
+        if (!columns.Contains("project_status"))
+        {
+            var addStatus = connection.CreateCommand();
+            addStatus.CommandText = """
+                ALTER TABLE sessions ADD COLUMN project_status TEXT NOT NULL DEFAULT 'unidentified';
+                UPDATE sessions
+                SET project_status = CASE
+                    WHEN project_path IS NULL OR TRIM(project_path) = '' THEN 'unidentified'
+                    ELSE 'pending'
+                END;
+                """;
+            await addStatus.ExecuteNonQueryAsync(cancellationToken);
+            requiresProjectRescan = true;
+        }
+
+        var versionCommand = connection.CreateCommand();
+        versionCommand.CommandText = "SELECT value FROM settings WHERE key = 'project_identity_version'";
+        var currentVersion = Convert.ToString(await versionCommand.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+        if (!string.Equals(currentVersion, ProjectIdentityVersion, StringComparison.Ordinal))
+        {
+            requiresProjectRescan = true;
+        }
+
+        if (requiresProjectRescan)
         {
             var rescan = connection.CreateCommand();
-            rescan.CommandText = "DELETE FROM file_checkpoints WHERE session_id IS NOT NULL";
+            rescan.CommandText = """
+                DELETE FROM file_checkpoints WHERE session_id IS NOT NULL;
+                INSERT INTO settings(key, value) VALUES('project_identity_version', $version)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+                """;
+            rescan.Parameters.AddWithValue("$version", ProjectIdentityVersion);
             await rescan.ExecuteNonQueryAsync(cancellationToken);
         }
     }
 
+    private static async Task EnsurePriceChangeCandidatesSchemaAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        var primaryKeyColumns = new SortedDictionary<int, string>();
+        var inspect = connection.CreateCommand();
+        inspect.CommandText = "PRAGMA table_info(price_change_candidates)";
+        await using (var reader = await inspect.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var primaryKeyPosition = reader.GetInt32(5);
+                if (primaryKeyPosition > 0)
+                {
+                    primaryKeyColumns[primaryKeyPosition] = reader.GetString(1);
+                }
+            }
+        }
+
+        string[] expectedPrimaryKey = ["source_id", "model", "effective_utc"];
+        if (primaryKeyColumns.Values.SequenceEqual(expectedPrimaryKey, StringComparer.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+        var rebuild = connection.CreateCommand();
+        rebuild.Transaction = transaction;
+        rebuild.CommandText = """
+            CREATE TABLE price_change_candidates_v2(
+                source_id TEXT NOT NULL,
+                model TEXT NOT NULL COLLATE NOCASE,
+                effective_utc TEXT NOT NULL,
+                input_usd_per_million TEXT NULL,
+                cached_input_usd_per_million TEXT NULL,
+                output_usd_per_million TEXT NULL,
+                maximum_change_ratio TEXT NOT NULL,
+                matching_observations INTEGER NOT NULL,
+                first_observed_utc TEXT NOT NULL,
+                last_observed_utc TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                PRIMARY KEY(source_id, model, effective_utc)
+            );
+
+            INSERT INTO price_change_candidates_v2(
+                source_id, model, effective_utc, input_usd_per_million,
+                cached_input_usd_per_million, output_usd_per_million,
+                maximum_change_ratio, matching_observations, first_observed_utc,
+                last_observed_utc, content_hash)
+            SELECT
+                source_id, model, effective_utc, input_usd_per_million,
+                cached_input_usd_per_million, output_usd_per_million,
+                maximum_change_ratio, matching_observations, first_observed_utc,
+                last_observed_utc, content_hash
+            FROM price_change_candidates;
+
+            DROP TABLE price_change_candidates;
+            ALTER TABLE price_change_candidates_v2 RENAME TO price_change_candidates;
+            """;
+        await rebuild.ExecuteNonQueryAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+    }
+
     private sealed record ProjectSessionRow(
+        string SessionId,
         string? ProjectPath,
         string? ProjectName,
         string Model,
         TokenUsage Usage,
         DateTimeOffset LastActivityAt);
 
+    private sealed record DailyProjectSessionRow(
+        string SessionId,
+        string DisplayName,
+        string Model,
+        string ReasoningEffort,
+        string? ProjectPath,
+        string? ProjectName,
+        string ProjectStatus,
+        TokenUsage Usage,
+        DateTimeOffset LastEventAt);
+
     private const string SessionColumns = """
         session_id, rollout_path, created_utc, last_activity_utc, title, title_updated_utc,
-        model, reasoning_effort, project_path, project_name,
+        model, reasoning_effort, project_path, project_name, project_status,
         total_input_tokens, total_cached_input_tokens, total_cache_write_input_tokens,
         total_output_tokens, total_reasoning_output_tokens, total_tokens,
         last_input_tokens, last_cached_input_tokens, last_cache_write_input_tokens,
@@ -1150,7 +1963,7 @@ public sealed class MonitorDatabase(string databasePath)
 
     private const string SessionInsertValues = """
         $session_id, $rollout_path, $created_utc, $last_activity_utc, $title, $title_updated_utc,
-        $model, $reasoning_effort, $project_path, $project_name,
+        $model, $reasoning_effort, $project_path, $project_name, $project_status,
         $total_input_tokens, $total_cached_input_tokens, $total_cache_write_input_tokens,
         $total_output_tokens, $total_reasoning_output_tokens, $total_tokens,
         $last_input_tokens, $last_cached_input_tokens, $last_cache_write_input_tokens,
@@ -1173,6 +1986,7 @@ public sealed class MonitorDatabase(string databasePath)
             reasoning_effort TEXT NULL,
             project_path TEXT NULL,
             project_name TEXT NULL,
+            project_status TEXT NOT NULL DEFAULT 'unidentified',
             total_input_tokens INTEGER NOT NULL,
             total_cached_input_tokens INTEGER NOT NULL,
             total_cache_write_input_tokens INTEGER NOT NULL,
@@ -1251,6 +2065,63 @@ public sealed class MonitorDatabase(string databasePath)
 
         CREATE INDEX IF NOT EXISTS ix_token_usage_events_session_time
             ON token_usage_events(session_id, event_utc, id);
+        """;
+
+    private const string PricingSchemaSql = """
+        CREATE TABLE IF NOT EXISTS model_price_versions(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id TEXT NOT NULL,
+            model TEXT NOT NULL COLLATE NOCASE,
+            input_usd_per_million TEXT NULL,
+            cached_input_usd_per_million TEXT NULL,
+            output_usd_per_million TEXT NULL,
+            source_kind TEXT NOT NULL CHECK(source_kind IN (
+                'official', 'third_party_reference', 'built_in_default')),
+            source_name TEXT NOT NULL,
+            source_url TEXT NOT NULL,
+            effective_utc TEXT NOT NULL,
+            retrieved_utc TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            source_revision TEXT NULL,
+            parser_version TEXT NOT NULL,
+            is_backfill INTEGER NOT NULL CHECK(is_backfill IN (0, 1)),
+            created_utc TEXT NOT NULL,
+            UNIQUE(source_id, model, effective_utc, content_hash)
+        );
+
+        CREATE INDEX IF NOT EXISTS ix_model_price_versions_lookup
+            ON model_price_versions(model, source_kind, effective_utc DESC);
+
+        CREATE TABLE IF NOT EXISTS price_source_status(
+            source_id TEXT PRIMARY KEY,
+            source_kind TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            source_url TEXT NOT NULL,
+            enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+            gate_status TEXT NOT NULL,
+            last_attempt_utc TEXT NULL,
+            last_success_utc TEXT NULL,
+            next_check_utc TEXT NULL,
+            last_error TEXT NULL,
+            last_content_hash TEXT NULL,
+            last_source_revision TEXT NULL,
+            consecutive_failures INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS price_change_candidates(
+            source_id TEXT NOT NULL,
+            model TEXT NOT NULL COLLATE NOCASE,
+            effective_utc TEXT NOT NULL,
+            input_usd_per_million TEXT NULL,
+            cached_input_usd_per_million TEXT NULL,
+            output_usd_per_million TEXT NULL,
+            maximum_change_ratio TEXT NOT NULL,
+            matching_observations INTEGER NOT NULL,
+            first_observed_utc TEXT NOT NULL,
+            last_observed_utc TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            PRIMARY KEY(source_id, model, effective_utc)
+        );
         """;
 
     private const string DailyUsageSql = """

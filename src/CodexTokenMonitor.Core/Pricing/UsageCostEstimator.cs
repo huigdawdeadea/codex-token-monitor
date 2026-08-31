@@ -42,8 +42,7 @@ public static class UsageCostEstimator
     {
         var normalized = string.IsNullOrWhiteSpace(model) ? "unknown" : model.Trim().ToLowerInvariant();
         var rate = Rates.FirstOrDefault(candidate =>
-            normalized.Equals(candidate.Model, StringComparison.OrdinalIgnoreCase) ||
-            normalized.StartsWith(candidate.Model + "-", StringComparison.OrdinalIgnoreCase));
+            normalized.Equals(candidate.Model, StringComparison.OrdinalIgnoreCase));
         if (rate is null)
         {
             return new ModelUsageCost(normalized, usage, 0, 0, 0m, false);
@@ -62,7 +61,115 @@ public static class UsageCostEstimator
             uncachedInput,
             pricedTokens,
             decimal.Round(cost, 6, MidpointRounding.AwayFromZero),
-            true);
+            true,
+            [new PriceCoverageSummary(PriceSourceKinds.BuiltInDefault, pricedTokens, decimal.Round(cost, 6, MidpointRounding.AwayFromZero))]);
+    }
+
+    public static UsageCostPeriod EstimateTimedPeriod(
+        DateOnly startDate,
+        DateOnly endDate,
+        IEnumerable<TimedModelUsage> events,
+        PriceCatalog catalog)
+    {
+        var accumulators = new Dictionary<string, ModelCostAccumulator>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in events)
+        {
+            var model = NormalizeModel(item.Model);
+            if (!accumulators.TryGetValue(model, out var accumulator))
+            {
+                accumulator = new ModelCostAccumulator(model);
+                accumulators.Add(model, accumulator);
+            }
+
+            accumulator.Add(item, catalog);
+        }
+
+        var models = accumulators.Values
+            .Select(item => item.Build())
+            .OrderByDescending(item => item.EstimatedCostUsd)
+            .ThenByDescending(item => item.Usage.TotalTokens)
+            .ToArray();
+        var coverage = MergeCoverage(models.SelectMany(item => item.Coverage ?? []));
+        var usage = SumUsage(models.Select(item => item.Usage));
+        var pricedTokens = models.Sum(item => item.PricedTokens);
+        var official = coverage.FirstOrDefault(item => item.SourceKind == PriceSourceKinds.Official);
+
+        return new UsageCostPeriod(
+            startDate,
+            endDate,
+            usage,
+            pricedTokens,
+            Math.Max(usage.TotalTokens - pricedTokens, 0),
+            decimal.Round(models.Sum(item => item.EstimatedCostUsd), 6, MidpointRounding.AwayFromZero),
+            models,
+            coverage,
+            official?.Tokens ?? 0,
+            official?.EstimatedCostUsd ?? 0m);
+    }
+
+    private static string NormalizeModel(string model) =>
+        string.IsNullOrWhiteSpace(model) ? "unknown" : model.Trim().ToLowerInvariant();
+
+    private static IReadOnlyList<PriceCoverageSummary> MergeCoverage(IEnumerable<PriceCoverageSummary> coverage) =>
+        coverage
+            .GroupBy(item => item.SourceKind, StringComparer.Ordinal)
+            .Select(group => new PriceCoverageSummary(
+                group.Key,
+                group.Sum(item => item.Tokens),
+                decimal.Round(group.Sum(item => item.EstimatedCostUsd), 6, MidpointRounding.AwayFromZero)))
+            .OrderBy(item => PriceSourceKinds.Priority(item.SourceKind))
+            .ToArray();
+
+    private sealed class ModelCostAccumulator(string model)
+    {
+        private TokenUsage _usage = TokenUsage.Empty;
+        private readonly Dictionary<string, (long Tokens, decimal Cost)> _coverage = new(StringComparer.Ordinal);
+        private long _pricedTokens;
+        private long _uncachedInputTokens;
+        private decimal _cost;
+        private bool _hasBackfill;
+
+        public void Add(TimedModelUsage item, PriceCatalog catalog)
+        {
+            _usage = SumUsage([_usage, item.Usage]);
+            var cachedInput = Math.Clamp(item.Usage.CachedInputTokens, 0, item.Usage.InputTokens);
+            var uncachedInput = Math.Max(item.Usage.InputTokens - cachedInput, 0);
+            _uncachedInputTokens += uncachedInput;
+            AddComponent(uncachedInput, catalog.Resolve(model, PriceComponent.Input, item.EventAt));
+            AddComponent(cachedInput, catalog.Resolve(model, PriceComponent.CachedInput, item.EventAt));
+            AddComponent(item.Usage.OutputTokens, catalog.Resolve(model, PriceComponent.Output, item.EventAt));
+        }
+
+        public ModelUsageCost Build() => new(
+            model,
+            _usage,
+            _uncachedInputTokens,
+            _pricedTokens,
+            decimal.Round(_cost, 6, MidpointRounding.AwayFromZero),
+            _pricedTokens > 0,
+            _coverage
+                .Select(item => new PriceCoverageSummary(
+                    item.Key,
+                    item.Value.Tokens,
+                    decimal.Round(item.Value.Cost, 6, MidpointRounding.AwayFromZero)))
+                .OrderBy(item => PriceSourceKinds.Priority(item.SourceKind))
+                .ToArray(),
+            _hasBackfill);
+
+        private void AddComponent(long tokens, ResolvedPriceComponent? price)
+        {
+            if (tokens <= 0 || price is null)
+            {
+                return;
+            }
+
+            var cost = tokens / TokensPerMillion * price.UsdPerMillion;
+            _pricedTokens += tokens;
+            _cost += cost;
+            _hasBackfill |= price.IsBackfilled;
+            var current = _coverage.GetValueOrDefault(price.SourceKind);
+            _coverage[price.SourceKind] = (current.Tokens + tokens, current.Cost + cost);
+        }
     }
 
     private static TokenUsage SumUsage(IEnumerable<TokenUsage> values) => values.Aggregate(

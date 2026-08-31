@@ -10,9 +10,12 @@ internal sealed record AppPaths(string CodexHome, string DataHome)
         var codexHome = string.IsNullOrWhiteSpace(configuredCodexHome)
             ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex")
             : configuredCodexHome;
-        var dataHome = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "CodexTokenMonitor");
+        var configuredDataHome = Environment.GetEnvironmentVariable("CODEX_TOKEN_MONITOR_DATA_HOME");
+        var dataHome = string.IsNullOrWhiteSpace(configuredDataHome)
+            ? Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "CodexTokenMonitor")
+            : configuredDataHome;
         return new AppPaths(Path.GetFullPath(codexHome), Path.GetFullPath(dataHome));
     }
 }

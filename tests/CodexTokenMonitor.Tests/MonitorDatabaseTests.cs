@@ -43,6 +43,7 @@ public sealed class MonitorDatabaseTests
 
         Assert.Contains("project_path", columns);
         Assert.Contains("project_name", columns);
+        Assert.Contains("project_status", columns);
     }
 
     [Fact]
@@ -184,6 +185,51 @@ public sealed class MonitorDatabaseTests
     }
 
     [Fact]
+    public async Task SchedulesOneProjectMetadataRescanWhenIdentityRulesChange()
+    {
+        using var temporary = new TemporaryDirectory();
+        var databasePath = Path.Combine(temporary.Path, "monitor.db");
+        var database = new MonitorDatabase(databasePath);
+        await database.InitializeAsync();
+        var timestamp = DateTimeOffset.UtcNow;
+        await database.ApplyFileResultAsync(new RolloutFileResult(
+            "identity.jsonl",
+            120,
+            false,
+            "identity-session",
+            new ParsedSessionMetadata(
+                "identity-session",
+                timestamp,
+                "gpt-test",
+                "desktop",
+                "D:\\worktrees\\1234",
+                "1234",
+                "pending"),
+            null,
+            1,
+            1,
+            0,
+            0));
+
+        await using (var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False"))
+        {
+            await connection.OpenAsync();
+            var downgrade = connection.CreateCommand();
+            downgrade.CommandText = "UPDATE settings SET value = '1' WHERE key = 'project_identity_version'";
+            await downgrade.ExecuteNonQueryAsync();
+        }
+
+        await database.InitializeAsync();
+
+        Assert.Null(await database.GetCheckpointAsync("identity.jsonl"));
+        await using var verify = new SqliteConnection($"Data Source={databasePath};Mode=ReadOnly;Pooling=False");
+        await verify.OpenAsync();
+        var version = verify.CreateCommand();
+        version.CommandText = "SELECT value FROM settings WHERE key = 'project_identity_version'";
+        Assert.Equal("2", Convert.ToString(await version.ExecuteScalarAsync()));
+    }
+
+    [Fact]
     public async Task AggregatesDailyUsageAcrossGrowthAndCounterResetsWithoutDoubleCounting()
     {
         using var temporary = new TemporaryDirectory();
@@ -218,6 +264,100 @@ public sealed class MonitorDatabaseTests
         Assert.Equal(1, summary.Today.SessionCount);
         Assert.Equal(1, summary.TotalSessions);
         Assert.Equal(7, summary.Days.Count);
+    }
+
+    [Fact]
+    public async Task IgnoresRepeatedCumulativeUsageSnapshotsAtDifferentTimes()
+    {
+        using var temporary = new TemporaryDirectory();
+        var database = new MonitorDatabase(Path.Combine(temporary.Path, "monitor.db"));
+        await database.InitializeAsync();
+        var timestamp = DateTimeOffset.UtcNow;
+        ParsedTokenEvent[] events =
+        [
+            new(timestamp, Usage(100, 80, 20, 5), Usage(100, 80, 20, 5), 1000),
+            new(timestamp.AddSeconds(1), Usage(100, 80, 20, 5), Usage(100, 80, 20, 5), 1000)
+        ];
+
+        await database.ApplyFileResultAsync(new RolloutFileResult(
+            "duplicate.jsonl", 100, false, "duplicate-session",
+            new ParsedSessionMetadata("duplicate-session", timestamp, "gpt-test", "desktop"),
+            events[^1], 3, 3, 0, 0, null, events));
+
+        var summary = await database.GetUsageSummaryAsync(7);
+        Assert.Equal(120, summary.AllTime.TotalTokens);
+    }
+
+    [Fact]
+    public async Task ReturnsAnEmptySkillUsageSummaryAfterInitialization()
+    {
+        using var temporary = new TemporaryDirectory();
+        var database = new MonitorDatabase(Path.Combine(temporary.Path, "monitor.db"));
+        await database.InitializeAsync();
+
+        var summary = await database.GetSkillUsageSummaryAsync();
+
+        Assert.Empty(summary.Skills);
+        Assert.Equal(100m, summary.CoveragePercent);
+    }
+
+    [Fact]
+    public async Task ReplacesSkillRolloutAndAggregatesExclusiveAndCollaborationUsage()
+    {
+        using var temporary = new TemporaryDirectory();
+        var database = new MonitorDatabase(Path.Combine(temporary.Path, "monitor.db"));
+        await database.InitializeAsync();
+        var observedAt = DateTimeOffset.UtcNow;
+        var firstPath = Path.Combine(temporary.Path, "first", "SKILL.md");
+        var secondPath = Path.Combine(temporary.Path, "second", "SKILL.md");
+        await database.ReplaceSkillDefinitionsAsync(
+        [
+            new("first", firstPath, "codex", true, "hash-1", 100, 90, 30, "o200k_base", "1", false, observedAt),
+            new("second", secondPath, "agent", true, "hash-2", 120, 100, 40, "o200k_base", "1", false, observedAt)
+        ]);
+        var rolloutPath = Path.Combine(temporary.Path, "rollout.jsonl");
+        var firstInvocation = new SkillInvocationSnapshot(
+            "session", rolloutPath, "task", "first", firstPath, "hash-1", "high",
+            observedAt, observedAt.AddMinutes(1), "gpt-test", 30, "full_read");
+        await database.ReplaceSkillRolloutAsync(new SkillRolloutAnalysis(
+            rolloutPath, 100, 10,
+            [firstInvocation],
+            [
+                new("session", rolloutPath, "task", observedAt.AddSeconds(1), "gpt-test", "exclusive", "first", "first", "high", Usage(80, 20, 20, 5)),
+                new("session", rolloutPath, "task", observedAt.AddSeconds(2), "gpt-test", "collaboration", "first+second", "first|second", "high", Usage(160, 40, 40, 10))
+            ]), 1);
+
+        var initial = await database.GetSkillUsageSummaryAsync();
+        Assert.Equal(2, initial.ActiveSkillCount);
+        Assert.Equal(1, initial.InvocationCount);
+        Assert.Equal(100, initial.ExclusiveTokens);
+        Assert.Equal(200, initial.CollaborativeTokens);
+        Assert.Equal(200, Assert.Single(initial.Collaborations).Usage.TotalTokens);
+        Assert.Equal(200, Assert.Single(initial.Collaborations).UnpricedTokens);
+        Assert.Equal(200, Assert.Single(initial.Skills, item => item.Name == "second").CollaborativeUsage.TotalTokens);
+        Assert.False(await database.SkillRolloutNeedsRebuildAsync(rolloutPath, 100, 10, 1));
+
+        await database.ReplaceSkillDefinitionsAsync(
+        [
+            new("first", firstPath, "codex", true, "hash-1-updated", 110, 95, 32, "o200k_base", "1", false, observedAt.AddMinutes(2)),
+            new("second", secondPath, "agent", true, "hash-2", 120, 100, 40, "o200k_base", "1", false, observedAt.AddMinutes(2))
+        ]);
+        var versioned = await database.GetSkillUsageSummaryAsync();
+        var firstSkill = Assert.Single(versioned.Skills, item => item.Name == "first");
+        Assert.Equal(32, firstSkill.BaseTokens);
+        Assert.Equal(2, firstSkill.Versions.Count);
+
+        await database.ReplaceSkillRolloutAsync(new SkillRolloutAnalysis(
+            rolloutPath, 120, 11,
+            [firstInvocation with { LoadedTokens = 35 }],
+            [new("session", rolloutPath, "task", observedAt.AddSeconds(3), "gpt-test", "exclusive", "first", "first", "high", Usage(240, 60, 60, 15))]), 1);
+
+        var replaced = await database.GetSkillUsageSummaryAsync();
+        Assert.Equal(1, replaced.InvocationCount);
+        Assert.Equal(300, replaced.ExclusiveTokens);
+        Assert.Equal(0, replaced.CollaborativeTokens);
+        Assert.Empty(replaced.Collaborations);
+        Assert.True(await database.SkillRolloutNeedsRebuildAsync(rolloutPath, 120, 11, 2));
     }
 
     [Fact]
@@ -367,6 +507,107 @@ public sealed class MonitorDatabaseTests
     }
 
     [Fact]
+    public async Task AggregatesEveryPositiveSessionIntoExactlyOneDailyProject()
+    {
+        using var temporary = new TemporaryDirectory();
+        var database = new MonitorDatabase(Path.Combine(temporary.Path, "monitor.db"));
+        await database.InitializeAsync();
+        var localNoon = DateTime.Today.AddHours(12);
+        var selectedAt = new DateTimeOffset(localNoon, TimeZoneInfo.Local.GetUtcOffset(localNoon));
+        var previousAt = selectedAt.AddDays(-1);
+
+        async Task ApplyAsync(
+            string sessionId,
+            string path,
+            string? projectPath,
+            string? projectName,
+            string projectStatus,
+            IReadOnlyList<ParsedTokenEvent> events)
+        {
+            await database.ApplyFileResultAsync(new RolloutFileResult(
+                path,
+                100,
+                false,
+                sessionId,
+                new ParsedSessionMetadata(
+                    sessionId,
+                    events[0].Timestamp,
+                    "gpt-test",
+                    "desktop",
+                    projectPath,
+                    projectName,
+                    projectStatus),
+                events[^1],
+                events.Count + 1,
+                events.Count + 1,
+                0,
+                0,
+                null,
+                events));
+        }
+
+        ParsedTokenEvent[] firstEvents =
+        [
+            new(previousAt, Usage(80, 60, 20, 5), Usage(80, 60, 20, 5), 1000),
+            new(selectedAt, Usage(240, 160, 60, 15), Usage(160, 100, 40, 10), 1000)
+        ];
+        ParsedTokenEvent[] secondEvents =
+        [
+            new(selectedAt.AddMinutes(1), Usage(80, 50, 20, 5), Usage(80, 50, 20, 5), 1000)
+        ];
+        ParsedTokenEvent[] sameNameDifferentRepository =
+        [
+            new(selectedAt.AddMinutes(2), Usage(40, 20, 10, 2), Usage(40, 20, 10, 2), 1000)
+        ];
+        ParsedTokenEvent[] pendingEvents =
+        [
+            new(selectedAt.AddMinutes(3), Usage(20, 10, 5, 1), Usage(20, 10, 5, 1), 1000)
+        ];
+        ParsedTokenEvent[] unidentifiedEvents =
+        [
+            new(selectedAt.AddMinutes(4), Usage(8, 4, 2, 1), Usage(8, 4, 2, 1), 1000)
+        ];
+
+        await ApplyAsync("alpha-one", "alpha-one.jsonl", "D:\\repos\\alpha", "alpha", "git", firstEvents);
+        await ApplyAsync("alpha-two", "alpha-two.jsonl", "d:\\repos\\alpha", "alpha", "git", secondEvents);
+        await ApplyAsync("other-alpha", "other-alpha.jsonl", "D:\\other\\alpha", "alpha", "git", sameNameDifferentRepository);
+        await ApplyAsync("pending", "pending.jsonl", "D:\\deleted\\worktree", "worktree", "pending", pendingEvents);
+        await ApplyAsync("unidentified", "unidentified.jsonl", null, null, "unidentified", unidentifiedEvents);
+        await ApplyAsync("alpha-two", "alpha-two.jsonl", "d:\\repos\\alpha", "alpha", "git", secondEvents);
+
+        var selectedDate = DateOnly.FromDateTime(localNoon);
+        var breakdown = await database.GetDailyProjectUsageAsync(selectedDate);
+
+        Assert.Equal(selectedDate, breakdown.Date);
+        Assert.Equal(DateOnly.FromDateTime(previousAt.LocalDateTime), breakdown.EarliestDate);
+        Assert.Equal(DateOnly.FromDateTime(DateTime.Now), breakdown.LatestDate);
+        Assert.Equal(5, breakdown.SessionCount);
+        Assert.Equal(4, breakdown.Projects.Count);
+        Assert.Equal(385, breakdown.Usage.TotalTokens);
+        Assert.Equal(308, breakdown.Usage.InputTokens);
+        Assert.Equal(77, breakdown.Usage.OutputTokens);
+        Assert.Equal(184, breakdown.Usage.CachedInputTokens);
+        Assert.Equal(19, breakdown.Usage.ReasoningOutputTokens);
+        Assert.Equal(breakdown.Usage, Sum(breakdown.Projects.Select(project => project.Usage)));
+        Assert.Equal(breakdown.SessionCount, breakdown.Projects.Sum(project => project.Sessions.Count));
+
+        var alpha = Assert.Single(breakdown.Projects, project =>
+            string.Equals(project.ProjectPath, "D:\\repos\\alpha", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal("git", alpha.ProjectStatus);
+        Assert.Equal(2, alpha.Sessions.Count);
+        Assert.Equal(300, alpha.Usage.TotalTokens);
+        Assert.Equal(alpha.Usage, Sum(alpha.Sessions.Select(session => session.Usage)));
+        Assert.Contains(breakdown.Projects, project => project.ProjectPath == "D:\\other\\alpha");
+        Assert.Contains(breakdown.Projects, project => project.ProjectStatus == "pending");
+        Assert.Contains(breakdown.Projects, project => project.ProjectStatus == "unidentified");
+
+        var empty = await database.GetDailyProjectUsageAsync(selectedDate.AddDays(-2));
+        Assert.Empty(empty.Projects);
+        Assert.Equal(TokenUsage.Empty, empty.Usage);
+        Assert.Equal(0, empty.SessionCount);
+    }
+
+    [Fact]
     public async Task RejectsAnnotationForUnknownSession()
     {
         using var temporary = new TemporaryDirectory();
@@ -399,4 +640,14 @@ public sealed class MonitorDatabaseTests
 
     private static TokenUsage Usage(long input, long cachedInput, long output, long reasoningOutput) =>
         new(input, cachedInput, 0, output, reasoningOutput, input + output);
+
+    private static TokenUsage Sum(IEnumerable<TokenUsage> usages) => usages.Aggregate(
+        TokenUsage.Empty,
+        (total, usage) => new TokenUsage(
+            total.InputTokens + usage.InputTokens,
+            total.CachedInputTokens + usage.CachedInputTokens,
+            total.CacheWriteInputTokens + usage.CacheWriteInputTokens,
+            total.OutputTokens + usage.OutputTokens,
+            total.ReasoningOutputTokens + usage.ReasoningOutputTokens,
+            total.TotalTokens + usage.TotalTokens));
 }

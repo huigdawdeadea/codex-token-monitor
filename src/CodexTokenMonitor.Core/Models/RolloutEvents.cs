@@ -8,7 +8,8 @@ public sealed record ParsedSessionMetadata(
     string? Model,
     string? ThreadSource,
     string? ProjectPath = null,
-    string? ProjectName = null) : ParsedRolloutEvent(Timestamp);
+    string? ProjectName = null,
+    string ProjectStatus = "unidentified") : ParsedRolloutEvent(Timestamp);
 
 public sealed record ParsedTokenEvent(
     DateTimeOffset Timestamp,
