@@ -24,6 +24,10 @@ const state = {
   sessionQuestionsError: "",
   annotationEditing: false,
   sessionTokenSort: null,
+  sessionVisibleCount: 50,
+  loadedViews: new Set(),
+  dataVersions: null,
+  rebuild: null,
   view: "overview"
 };
 
@@ -275,7 +279,8 @@ function renderSessions() {
     : state.sessionTokenSort === "asc"
       ? "当前按累计 token 从低到高排序，点击改为从高到低"
       : "按累计 token 从高到低排序");
-  $("#session-table-body").innerHTML = rows.map((session) => `
+  const visibleRows = rows.slice(0, state.sessionVisibleCount);
+  $("#session-table-body").innerHTML = visibleRows.map((session) => `
     <tr>
       <td class="session-cell"><strong>${escapeHtml(visibleSessionName(session))}</strong><small>${escapeHtml(privacyMask ? String(session.sessionId).slice(0, 8) : session.sessionId)} · <span class="state-pill ${session.isActive ? "active" : ""} ${session.dataStatus !== "healthy" ? "degraded" : ""}">${session.dataStatus !== "healthy" ? "异常" : session.isActive ? "活动" : "静止"}</span></small></td>
       <td>${escapeHtml(session.model)}<br><small>${escapeHtml(session.reasoningEffort)}</small></td>
@@ -284,7 +289,9 @@ function renderSessions() {
       <td>${session.estimatedContextPercent ?? "--"}%<br><small>${formatExact(session.lastUsage.totalTokens)} / ${formatExact(session.modelContextWindow)}</small></td>
       <td>${formatTime(session.lastActivityAt)}</td>
       <td><button class="detail-button" type="button" data-action="details" data-session-id="${escapeHtml(session.sessionId)}">详情</button></td>
-    </tr>`).join("") || '<tr><td colspan="7">没有符合条件的会话。</td></tr>';
+    </tr>`).join("") + (rows.length > visibleRows.length
+      ? `<tr class="load-more-row"><td colspan="7"><button class="secondary-button" type="button" data-action="load-more-sessions">继续加载（${formatExact(visibleRows.length)} / ${formatExact(rows.length)}）</button></td></tr>`
+      : "") || '<tr><td colspan="7">没有符合条件的会话。</td></tr>';
 }
 
 function toggleSessionTokenSort() {
@@ -1038,6 +1045,15 @@ function renderSettings() {
     $("#pricing-settings-status").innerHTML = `<strong class="${pricing.isStale ? "stale" : ""}">${pricing.isRefreshing ? "正在检查..." : pricing.isStale ? "价格源未更新" : "价格源正常"}</strong><span>${sourceCopy}</span><small>下次自动检查：${pricing.nextAutomaticCheckAt ? formatTime(pricing.nextAutomaticCheckAt) : "待安排"}</small>`;
     $("#pricing-refresh").disabled = pricing.isRefreshing;
   }
+  if (state.rebuild) {
+    const running = state.rebuild.state === "queued" || state.rebuild.state === "running";
+    $("#rebuild-status").textContent = running
+      ? "正在重建派生索引，历史 token 事实会保留。"
+      : state.rebuild.state === "completed"
+        ? `最近重建完成：${formatTime(state.rebuild.completedAt)}`
+        : "只重建读取断点、Skills 归因和页面缓存，不删除历史 token 事实。";
+    $("#rebuild-derived").disabled = running;
+  }
 }
 
 function hasUnsavedAnnotationChanges() {
@@ -1057,36 +1073,7 @@ function hasUnsavedAnnotationChanges() {
 }
 
 async function refreshAll(showFeedback = false) {
-  try {
-    const [dashboard, sessions, models, usage, rankings, skills, settings, startup] = await Promise.all([
-      api("/api/dashboard"), api("/api/sessions"), api("/api/models"), api("/api/usage?days=14"), api("/api/rankings?limit=100"), api("/api/skills?confidence=high"), api("/api/settings"), api("/api/startup")
-    ]);
-    const selectedUsageDate = state.selectedUsageDate && usage.days.some((day) => day.date === state.selectedUsageDate)
-      ? state.selectedUsageDate
-      : usage.today.date;
-    const selectedProjectDate = state.selectedProjectDate || usage.today.date;
-    const [usageAnalysis, dailyProjects] = await Promise.all([
-      api(`/api/usage/analysis?date=${encodeURIComponent(selectedUsageDate)}`),
-      api(`/api/rankings/projects/daily?date=${encodeURIComponent(selectedProjectDate)}`)
-    ]);
-    Object.assign(state, {
-      dashboard, sessions, models, usage, usageAnalysis, selectedUsageDate,
-      rankings, dailyProjects, selectedProjectDate, skills, settings, startup,
-      pricing: usage.costEstimate?.pricingStatus || null
-    });
-    renderHealth();
-    renderOverview();
-    renderSessions();
-    renderModels();
-    renderUsage();
-    renderRankings();
-    renderSkills();
-    renderSettings();
-    if ($("#session-detail-dialog").open && !state.annotationEditing && !hasUnsavedAnnotationChanges()) renderSessionDetail();
-    if (showFeedback) showNotice("数据已刷新");
-  } catch (error) {
-    showNotice(`无法读取监控数据：${error.message}`, true);
-  }
+  return refreshCurrentView(showFeedback, true);
 }
 
 async function saveSessionAnnotation(event) {
@@ -1136,6 +1123,7 @@ function switchView(view) {
   $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === view));
   $$(".view").forEach((item) => item.classList.toggle("active", item.id === `view-${view}`));
   window.location.hash = view;
+  if (typeof requestViewLoad === "function") requestViewLoad(view);
 }
 
 async function saveSettings(event) {
@@ -1173,11 +1161,31 @@ async function refreshPricing() {
   }
 }
 
-function handleSessionAction(event) {
+async function handleSessionAction(event) {
+  const loadMore = event.target.closest('[data-action="load-more-sessions"]');
+  if (loadMore) {
+    state.sessionVisibleCount += 50;
+    renderSessions();
+    return;
+  }
   const detailButton = event.target.closest('[data-action="details"]');
   if (detailButton) {
+    if (!state.sessions.some((item) => item.sessionId === detailButton.dataset.sessionId)) {
+      await requestViewLoad("sessions");
+    }
     openSessionDetail(detailButton.dataset.sessionId);
     return;
+  }
+}
+
+async function rebuildDerivedData() {
+  if (!window.confirm("重建派生索引和页面缓存？历史 token 事实不会删除，期间页面数据可能短暂更新。")) return;
+  try {
+    state.rebuild = await api("/api/rebuild", { method: "POST" });
+    renderSettings();
+    showNotice("重建已开始");
+  } catch (error) {
+    showNotice(`无法开始重建：${error.message}`, true);
   }
 }
 
@@ -1267,8 +1275,8 @@ async function initialize() {
       await api("/api/refresh", { method: "POST" });
       window.setTimeout(() => refreshAll(true), 300);
     });
-    $("#session-search").addEventListener("input", renderSessions);
-    $("#session-filter").addEventListener("change", renderSessions);
+    $("#session-search").addEventListener("input", () => { state.sessionVisibleCount = 50; renderSessions(); });
+    $("#session-filter").addEventListener("change", () => { state.sessionVisibleCount = 50; renderSessions(); });
     $("#session-token-sort").addEventListener("click", toggleSessionTokenSort);
     $("#overview-content").addEventListener("click", handleSessionAction);
     $("#session-table-body").addEventListener("click", handleSessionAction);
@@ -1308,10 +1316,10 @@ async function initialize() {
     $("#pricing-refresh").addEventListener("click", refreshPricing);
     $("#clear-titles").addEventListener("click", () => destructiveAction("/api/titles", "清除监控数据库中的全部会话标题？token 数字不会删除。", "标题已清除"));
     $("#clear-history").addEventListener("click", () => destructiveAction("/api/history", "清除监控器保存的全部会话历史？Codex 原始文件不会删除。", "监控历史已清除"));
+    $("#rebuild-derived").addEventListener("click", rebuildDerivedData);
     const initialView = window.location.hash.slice(1);
     switchView(viewLabels[initialView] ? initialView : "overview");
-    await refreshAll();
-    window.setInterval(refreshAll, 3000);
+    await startRefreshCoordinator();
   } catch (error) {
     showNotice(`监控器启动失败：${error.message}`, true);
   }

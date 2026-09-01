@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using CodexTokenMonitor.Core.Metadata;
 using CodexTokenMonitor.Core.Models;
@@ -17,9 +18,16 @@ public sealed class CodexSessionMonitor : IAsyncDisposable
     private readonly SkillUsageAnalyzer _skillUsageAnalyzer;
     private readonly TimeSpan _scanInterval;
     private readonly TimeSpan _metadataInterval;
+    private readonly TimeSpan _definitionInterval = TimeSpan.FromMinutes(10);
     private readonly SemaphoreSlim _scanSignal = new(0, 1);
+    private readonly ConcurrentDictionary<string, byte> _changedPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly CancellationTokenSource _lifetime = new();
-    private int _refreshPending;
+    private readonly object _rebuildStatusGate = new();
+    private IReadOnlyList<SkillDefinitionSnapshot> _skillDefinitions = [];
+    private RebuildStatusSnapshot _rebuildStatus = new("idle", null, 0, 0, null, null, null);
+    private int _signalPending;
+    private int _fullRefreshPending = 1;
+    private int _fullRebuildPending;
     private FileSystemWatcher? _watcher;
     private Task? _monitorTask;
 
@@ -40,7 +48,7 @@ public sealed class CodexSessionMonitor : IAsyncDisposable
         _metadataReader = metadataReader;
         _health = health;
         _skillUsageAnalyzer = skillUsageAnalyzer ?? new SkillUsageAnalyzer(new SkillTokenCounter(), new RolloutEventParser());
-        _scanInterval = scanInterval ?? TimeSpan.FromSeconds(5);
+        _scanInterval = scanInterval ?? TimeSpan.FromSeconds(60);
         _metadataInterval = metadataInterval ?? TimeSpan.FromSeconds(30);
     }
 
@@ -59,10 +67,29 @@ public sealed class CodexSessionMonitor : IAsyncDisposable
 
     public void RequestRefresh()
     {
-        if (Interlocked.Exchange(ref _refreshPending, 1) == 0)
+        Interlocked.Exchange(ref _fullRefreshPending, 1);
+        SignalScan();
+    }
+
+    public RebuildStatusSnapshot GetRebuildStatus()
+    {
+        lock (_rebuildStatusGate)
         {
-            _scanSignal.Release();
+            return _rebuildStatus;
         }
+    }
+
+    public bool RequestFullRebuild()
+    {
+        if (Interlocked.Exchange(ref _fullRebuildPending, 1) != 0)
+        {
+            return false;
+        }
+
+        SetRebuildStatus(new RebuildStatusSnapshot(
+            "queued", "derived", 0, 0, null, null, null));
+        SignalScan();
+        return true;
     }
 
     public async Task StopAsync()
@@ -113,50 +140,118 @@ public sealed class CodexSessionMonitor : IAsyncDisposable
     private async Task RunAsync(CancellationToken cancellationToken)
     {
         var nextMetadataRead = DateTimeOffset.MinValue;
+        var nextReconciliation = DateTimeOffset.MinValue;
+        var nextDefinitionRead = DateTimeOffset.MinValue;
         while (!cancellationToken.IsCancellationRequested)
         {
-            await ScanAllAsync(cancellationToken);
-            await ScanSkillUsageAsync(cancellationToken);
-            if (DateTimeOffset.UtcNow >= nextMetadataRead)
+            var now = DateTimeOffset.UtcNow;
+            var rebuilding = Interlocked.Exchange(ref _fullRebuildPending, 0) != 0;
+            if (rebuilding)
             {
-                await RefreshMetadataAsync(cancellationToken);
-                nextMetadataRead = DateTimeOffset.UtcNow + _metadataInterval;
+                SetRebuildStatus(new RebuildStatusSnapshot(
+                    "running", "derived", 0, 0, now, null, null));
+                await _database.ResetDerivedDataAsync(cancellationToken);
+                Interlocked.Exchange(ref _fullRefreshPending, 1);
             }
 
-            if (await _scanSignal.WaitAsync(_scanInterval, cancellationToken))
+            var fullRefresh = Interlocked.Exchange(ref _fullRefreshPending, 0) != 0 || now >= nextReconciliation;
+            IReadOnlyList<string>? changedPaths = null;
+            if (fullRefresh)
             {
-                Interlocked.Exchange(ref _refreshPending, 0);
+                await ScanAllAsync(cancellationToken);
+                nextReconciliation = now + _scanInterval;
             }
+            else
+            {
+                changedPaths = DrainChangedPaths();
+                if (changedPaths.Count > 0)
+                {
+                    await ScanAllAsync(cancellationToken, changedPaths);
+                }
+            }
+
+            var refreshDefinitions = _skillDefinitions.Count == 0 || now >= nextDefinitionRead;
+            if (refreshDefinitions)
+            {
+                _skillDefinitions = await _skillUsageAnalyzer.ScanDefinitionsAsync(_codexHome, cancellationToken);
+                await _database.ReplaceSkillDefinitionsAsync(_skillDefinitions, cancellationToken);
+                nextDefinitionRead = now + _definitionInterval;
+            }
+
+            if (fullRefresh)
+            {
+                await ScanSkillUsageAsync(cancellationToken);
+            }
+            else if (changedPaths is { Count: > 0 })
+            {
+                await ScanSkillUsageAsync(cancellationToken, changedPaths);
+            }
+
+            if (rebuilding)
+            {
+                var watched = _health.GetSnapshot().WatchedFiles;
+                SetRebuildStatus(new RebuildStatusSnapshot(
+                    "completed", "derived", watched, watched, now, DateTimeOffset.UtcNow, null));
+                await _database.NotifyDataChangedAsync(["settings"], cancellationToken);
+            }
+
+            if (now >= nextMetadataRead)
+            {
+                await RefreshMetadataAsync(cancellationToken);
+                nextMetadataRead = now + _metadataInterval;
+            }
+
+            var nextWake = new[] { nextMetadataRead, nextReconciliation, nextDefinitionRead }.Min();
+            var delay = nextWake - DateTimeOffset.UtcNow;
+            if (delay < TimeSpan.FromMilliseconds(50))
+            {
+                delay = TimeSpan.FromMilliseconds(50);
+            }
+
+            await _scanSignal.WaitAsync(delay, cancellationToken);
+            Interlocked.Exchange(ref _signalPending, 0);
         }
     }
 
-    private async Task ScanSkillUsageAsync(CancellationToken cancellationToken)
+    private async Task ScanSkillUsageAsync(
+        CancellationToken cancellationToken,
+        IReadOnlyCollection<string>? requestedPaths = null)
     {
-        var definitions = await _skillUsageAnalyzer.ScanDefinitionsAsync(_codexHome, cancellationToken);
-        await _database.ReplaceSkillDefinitionsAsync(definitions, cancellationToken);
         if (!Directory.Exists(_sessionsRoot))
         {
             return;
         }
 
-        foreach (var path in Directory.EnumerateFiles(_sessionsRoot, "rollout-*.jsonl", SearchOption.AllDirectories))
+        var paths = requestedPaths ?? Directory
+            .EnumerateFiles(_sessionsRoot, "rollout-*.jsonl", SearchOption.AllDirectories)
+            .ToArray();
+        foreach (var path in paths)
         {
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
                 var info = new FileInfo(path);
-                if (!await _database.SkillRolloutNeedsRebuildAsync(
-                    path,
-                    info.Length,
-                    info.LastWriteTimeUtc.Ticks,
-                    SkillUsageAnalyzer.ParserVersion,
-                    cancellationToken))
+                if (!info.Exists)
                 {
                     continue;
                 }
 
-                var analysis = await _skillUsageAnalyzer.AnalyzeRolloutAsync(path, definitions, cancellationToken);
-                await _database.ReplaceSkillRolloutAsync(analysis, SkillUsageAnalyzer.ParserVersion, cancellationToken);
+                var checkpoint = await _database.GetSkillScanCheckpointAsync(path, cancellationToken);
+                if (checkpoint is not null &&
+                    checkpoint.ParserVersion == SkillUsageAnalyzer.ParserVersion &&
+                    checkpoint.Offset == info.Length &&
+                    checkpoint.Length == info.Length &&
+                    checkpoint.LastWriteUtcTicks == info.LastWriteTimeUtc.Ticks)
+                {
+                    continue;
+                }
+
+                var delta = await _skillUsageAnalyzer.AnalyzeRolloutIncrementAsync(
+                    path,
+                    _skillDefinitions,
+                    checkpoint,
+                    cancellationToken);
+                await _database.ApplySkillRolloutDeltaAsync(delta, SkillUsageAnalyzer.ParserVersion, cancellationToken);
             }
             catch (FileNotFoundException)
             {
@@ -185,7 +280,9 @@ public sealed class CodexSessionMonitor : IAsyncDisposable
         }
     }
 
-    private async Task ScanAllAsync(CancellationToken cancellationToken)
+    private async Task ScanAllAsync(
+        CancellationToken cancellationToken,
+        IReadOnlyCollection<string>? requestedPaths = null)
     {
         if (!Directory.Exists(_sessionsRoot))
         {
@@ -196,7 +293,13 @@ public sealed class CodexSessionMonitor : IAsyncDisposable
         string[] files;
         try
         {
-            files = Directory.GetFiles(_sessionsRoot, "rollout-*.jsonl", SearchOption.AllDirectories);
+            files = requestedPaths is null
+                ? Directory.GetFiles(_sessionsRoot, "rollout-*.jsonl", SearchOption.AllDirectories)
+                : requestedPaths
+                    .Where(path => Path.GetFileName(path).StartsWith("rollout-", StringComparison.OrdinalIgnoreCase) &&
+                        path.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
         }
         catch (IOException)
         {
@@ -211,7 +314,7 @@ public sealed class CodexSessionMonitor : IAsyncDisposable
 
         string? scanError = null;
         var processedFiles = 0;
-        var reportInitialProgress = _health.GetSnapshot().LastSuccessfulScanAt is null;
+        var reportInitialProgress = requestedPaths is null && _health.GetSnapshot().LastSuccessfulScanAt is null;
         foreach (var path in files.Order(StringComparer.OrdinalIgnoreCase))
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -261,13 +364,16 @@ public sealed class CodexSessionMonitor : IAsyncDisposable
             processedFiles++;
         }
 
+        var watchedFiles = requestedPaths is null
+            ? files.Length
+            : Math.Max(_health.GetSnapshot().WatchedFiles, files.Length);
         if (scanError is null)
         {
-            _health.RecordSuccess(files.Length);
+            _health.RecordSuccess(watchedFiles);
         }
         else
         {
-            _health.RecordDegraded(scanError, files.Length);
+            _health.RecordDegraded(scanError, watchedFiles);
         }
     }
 
@@ -286,14 +392,47 @@ public sealed class CodexSessionMonitor : IAsyncDisposable
         }
     }
 
-    private void OnRolloutChanged(object sender, FileSystemEventArgs args) => RequestRefresh();
+    private void OnRolloutChanged(object sender, FileSystemEventArgs args) => QueueChangedPath(args.FullPath);
 
-    private void OnRolloutRenamed(object sender, RenamedEventArgs args) => RequestRefresh();
+    private void OnRolloutRenamed(object sender, RenamedEventArgs args) => QueueChangedPath(args.FullPath);
 
     private void OnWatcherError(object sender, ErrorEventArgs args)
     {
         _health.RecordDegraded("file_watcher_error", _health.GetSnapshot().WatchedFiles);
         RequestRefresh();
+    }
+
+    private void QueueChangedPath(string path)
+    {
+        _changedPaths[Path.GetFullPath(path)] = 0;
+        SignalScan();
+    }
+
+    private IReadOnlyList<string> DrainChangedPaths()
+    {
+        var paths = _changedPaths.Keys.ToArray();
+        foreach (var path in paths)
+        {
+            _changedPaths.TryRemove(path, out _);
+        }
+
+        return paths;
+    }
+
+    private void SignalScan()
+    {
+        if (Interlocked.Exchange(ref _signalPending, 1) == 0)
+        {
+            _scanSignal.Release();
+        }
+    }
+
+    private void SetRebuildStatus(RebuildStatusSnapshot status)
+    {
+        lock (_rebuildStatusGate)
+        {
+            _rebuildStatus = status;
+        }
     }
 
     private static string ToSafeErrorCode(Exception exception) => exception switch

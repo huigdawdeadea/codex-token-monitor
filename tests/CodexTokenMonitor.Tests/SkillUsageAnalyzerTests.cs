@@ -69,6 +69,59 @@ public sealed class SkillUsageAnalyzerTests
         Assert.Equal(150, result.Attributions[1].Usage.TotalTokens);
     }
 
+    [Fact]
+    public async Task IncrementalAnalysisReadsOnlyCompleteAppendedLinesAndMatchesOnePass()
+    {
+        using var temporary = new TemporaryDirectory();
+        var skillPath = Path.Combine(temporary.Path, "incremental", "SKILL.md");
+        Directory.CreateDirectory(Path.GetDirectoryName(skillPath)!);
+        var skillContent = "---\nname: incremental\n---\nIncremental instructions.";
+        await File.WriteAllTextAsync(skillPath, skillContent);
+        var counter = new SkillTokenCounter();
+        var definitions = new[] { Definition("incremental", skillPath, skillContent, counter) };
+        var rollout = Path.Combine(temporary.Path, "rollout.jsonl");
+        var firstLines = new[]
+        {
+            Line("session_meta", new { id = "session-incremental" }),
+            Line("turn_context", new { turn_id = "task-1", model = "gpt-5.6-sol" }),
+            Line("response_item", new { type = "custom_tool_call", call_id = "call-1", input = $"Get-Content -Raw -LiteralPath '{skillPath}'" }),
+            Line("response_item", new { type = "custom_tool_call_output", call_id = "call-1", output = skillContent }),
+            TokenLine("2026-08-30T01:00:01Z", 100, 100)
+        };
+        var completePrefix = string.Join('\n', firstLines) + "\n";
+        var secondToken = TokenLine("2026-08-30T01:00:02Z", 250, 150);
+        var split = secondToken.Length / 2;
+        await File.WriteAllTextAsync(
+            rollout,
+            completePrefix + secondToken[..split],
+            new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+
+        var analyzer = new SkillUsageAnalyzer(counter, new RolloutEventParser());
+        var first = await analyzer.AnalyzeRolloutIncrementAsync(rollout, definitions, null);
+
+        Assert.Equal(Encoding.UTF8.GetByteCount(completePrefix), first.Offset);
+        Assert.Single(first.Attributions);
+        await File.AppendAllTextAsync(
+            rollout,
+            secondToken[split..] + "\n" + Line("event_msg", new { type = "task_complete", turn_id = "task-1" }) + "\n",
+            new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+        var checkpoint = new SkillScanCheckpoint(
+            rollout,
+            first.Offset,
+            first.Length,
+            first.LastWriteUtcTicks,
+            SkillUsageAnalyzer.ParserVersion,
+            first.StateJson);
+
+        var second = await analyzer.AnalyzeRolloutIncrementAsync(rollout, definitions, checkpoint);
+        var onePass = await analyzer.AnalyzeRolloutAsync(rollout, definitions);
+
+        Assert.False(second.ReplaceExisting);
+        Assert.Equal(new long[] { 100, 150 }, first.Attributions.Concat(second.Attributions).Select(item => item.Usage.TotalTokens));
+        Assert.Equal(onePass.Attributions.Select(item => item.Usage.TotalTokens), first.Attributions.Concat(second.Attributions).Select(item => item.Usage.TotalTokens));
+        Assert.Equal(onePass.Invocations.Single().EndedAt, second.Invocations.Single().EndedAt);
+    }
+
     private static SkillDefinitionSnapshot Definition(string name, string path, string content, SkillTokenCounter counter)
     {
         var count = counter.Count(content);

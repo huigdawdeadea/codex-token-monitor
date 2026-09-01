@@ -47,6 +47,26 @@ public sealed record SkillRolloutAnalysis(
     IReadOnlyList<SkillInvocationSnapshot> Invocations,
     IReadOnlyList<SkillAttributionSnapshot> Attributions);
 
+public sealed record SkillScanCheckpoint(
+    string Path,
+    long Offset,
+    long Length,
+    long LastWriteUtcTicks,
+    int ParserVersion,
+    string StateJson);
+
+public sealed record SkillRolloutDelta(
+    string RolloutPath,
+    long Offset,
+    long Length,
+    long LastWriteUtcTicks,
+    string StateJson,
+    bool ReplaceExisting,
+    int CompleteLines,
+    int OversizedLines,
+    IReadOnlyList<SkillInvocationSnapshot> Invocations,
+    IReadOnlyList<SkillAttributionSnapshot> Attributions);
+
 public sealed record SkillUsageSummary(
     int ActiveSkillCount,
     int InvocationCount,

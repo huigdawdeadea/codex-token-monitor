@@ -47,6 +47,44 @@ public sealed class MonitorDatabaseTests
     }
 
     [Fact]
+    public async Task SkillMigrationKeepsMostCompleteLegacyInvocationDuplicate()
+    {
+        using var temporary = new TemporaryDirectory();
+        var databasePath = Path.Combine(temporary.Path, "monitor.db");
+        var database = new MonitorDatabase(databasePath);
+        await database.InitializeAsync();
+        await using (var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False"))
+        {
+            await connection.OpenAsync();
+            var legacy = connection.CreateCommand();
+            legacy.CommandText = """
+                DROP INDEX ux_skill_invocation_identity;
+                INSERT INTO skill_invocations(
+                    session_id, rollout_path, task_id, skill_name, skill_path, version_hash,
+                    confidence, started_utc, ended_utc, model, loaded_tokens, evidence_kind)
+                VALUES
+                    ('session', 'rollout', 'task', 'skill', 'skill.md', 'hash',
+                     'medium', '2026-08-20T01:00:00Z', NULL, 'model', 0, 'verified_skill_path'),
+                    ('session', 'rollout', 'task', 'skill', 'skill.md', 'hash',
+                     'high', '2026-08-20T01:00:00Z', '2026-08-20T01:01:00Z', 'model', 600, 'complete_skill_read');
+                """;
+            await legacy.ExecuteNonQueryAsync();
+        }
+
+        await database.InitializeAsync();
+
+        await using var verify = new SqliteConnection($"Data Source={databasePath};Mode=ReadOnly;Pooling=False");
+        await verify.OpenAsync();
+        var selected = verify.CreateCommand();
+        selected.CommandText = "SELECT COUNT(*), MAX(loaded_tokens), MAX(ended_utc IS NOT NULL) FROM skill_invocations";
+        await using var reader = await selected.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(1, reader.GetInt32(0));
+        Assert.Equal(600, reader.GetInt64(1));
+        Assert.Equal(1, reader.GetInt32(2));
+    }
+
+    [Fact]
     public async Task PersistsSnapshotsSettingsAndCheckpoints()
     {
         using var temporary = new TemporaryDirectory();
@@ -636,6 +674,45 @@ public sealed class MonitorDatabaseTests
         Assert.True(await database.PrepareUsageBackfillAsync());
         Assert.Null(await database.GetCheckpointAsync("legacy.jsonl"));
         Assert.False(await database.PrepareUsageBackfillAsync());
+    }
+
+    [Fact]
+    public async Task VersionsPersistAndDerivedResetPreservesRawTokenFacts()
+    {
+        using var temporary = new TemporaryDirectory();
+        var databasePath = Path.Combine(temporary.Path, "monitor.db");
+        var database = new MonitorDatabase(databasePath);
+        await database.InitializeAsync();
+        var before = await database.GetDataVersionsAsync();
+        var timestamp = DateTimeOffset.Parse("2026-08-31T01:00:00Z");
+        await database.ApplyFileResultAsync(new RolloutFileResult(
+            "rollout-version.jsonl",
+            120,
+            false,
+            "session-version",
+            new ParsedSessionMetadata("session-version", timestamp, "gpt-test", "desktop"),
+            new ParsedTokenEvent(timestamp, Usage(80, 20, 20, 5), Usage(80, 20, 20, 5), 1000),
+            2,
+            2,
+            0,
+            0));
+        var changed = await database.GetDataVersionsAsync();
+        Assert.True(changed.Usage > before.Usage);
+        await database.WriteMaterializedViewAsync("test-view", changed.Usage.ToString(), new[] { 1, 2, 3 });
+        Assert.Equal(new[] { 1, 2, 3 }, await database.ReadMaterializedViewAsync<int[]>("test-view", changed.Usage.ToString()));
+
+        await database.ResetDerivedDataAsync();
+
+        Assert.Null(await database.GetCheckpointAsync("rollout-version.jsonl"));
+        Assert.Null(await database.ReadMaterializedViewAsync<int[]>("test-view", changed.Usage.ToString()));
+        await using var connection = new SqliteConnection($"Data Source={databasePath};Mode=ReadOnly;Pooling=False");
+        await connection.OpenAsync();
+        var count = connection.CreateCommand();
+        count.CommandText = "SELECT COUNT(*) FROM token_usage_events";
+        Assert.Equal(1L, (long)(await count.ExecuteScalarAsync())!);
+        var reopened = new MonitorDatabase(databasePath);
+        var persisted = await reopened.GetDataVersionsAsync();
+        Assert.True(persisted.Usage > changed.Usage);
     }
 
     private static TokenUsage Usage(long input, long cachedInput, long output, long reasoningOutput) =>

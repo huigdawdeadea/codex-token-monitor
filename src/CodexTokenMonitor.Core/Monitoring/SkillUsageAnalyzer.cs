@@ -7,9 +7,14 @@ using CodexTokenMonitor.Core.Parsing;
 
 namespace CodexTokenMonitor.Core.Monitoring;
 
-public sealed partial class SkillUsageAnalyzer(SkillTokenCounter tokenCounter, RolloutEventParser tokenParser)
+public sealed partial class SkillUsageAnalyzer(
+    SkillTokenCounter tokenCounter,
+    RolloutEventParser tokenParser,
+    IncrementalJsonlReader? incrementalReader = null)
 {
-    public const int ParserVersion = 2;
+    public const int ParserVersion = 3;
+    private readonly IncrementalJsonlReader _incrementalReader = incrementalReader ?? new IncrementalJsonlReader();
+    private static readonly JsonSerializerOptions StateJsonOptions = new(JsonSerializerDefaults.Web);
 
     public async Task<IReadOnlyList<SkillDefinitionSnapshot>> ScanDefinitionsAsync(
         string codexHome,
@@ -112,6 +117,7 @@ public sealed partial class SkillUsageAnalyzer(SkillTokenCounter tokenCounter, R
                     if (text.Contains("<skills_instructions>", StringComparison.Ordinal))
                     {
                         latestInstructions = text;
+                        break;
                     }
                 }
             }
@@ -158,34 +164,65 @@ public sealed partial class SkillUsageAnalyzer(SkillTokenCounter tokenCounter, R
         IReadOnlyList<SkillDefinitionSnapshot> definitions,
         CancellationToken cancellationToken = default)
     {
+        var delta = await AnalyzeRolloutIncrementAsync(rolloutPath, definitions, null, cancellationToken);
+        return new SkillRolloutAnalysis(
+            delta.RolloutPath,
+            delta.Length,
+            delta.LastWriteUtcTicks,
+            delta.Invocations,
+            delta.Attributions);
+    }
+
+    public async Task<SkillRolloutDelta> AnalyzeRolloutIncrementAsync(
+        string rolloutPath,
+        IReadOnlyList<SkillDefinitionSnapshot> definitions,
+        SkillScanCheckpoint? checkpoint,
+        CancellationToken cancellationToken = default)
+    {
         var definitionsByPath = definitions.ToDictionary(
             item => NormalizePath(item.Path),
             StringComparer.OrdinalIgnoreCase);
-        var invocations = new List<InvocationBuilder>();
+        var state = ReadState(checkpoint?.StateJson);
+        var changedInvocations = new Dictionary<string, InvocationBuilder>(StringComparer.Ordinal);
         var attributions = new List<SkillAttributionSnapshot>();
-        var pendingCalls = new Dictionary<string, PendingSkillRead>(StringComparer.Ordinal);
-        var active = new Dictionary<string, InvocationBuilder>(StringComparer.OrdinalIgnoreCase);
-        var currentTask = "unknown";
-        var currentModel = "unknown";
-        var sessionId = "unknown";
-        var candidateSkillTask = false;
-        TokenUsage? previousTotal = null;
-
-        await using var stream = new FileStream(
+        var pendingCalls = state.PendingCalls.ToDictionary(
+            item => item.CallId,
+            item => new PendingSkillRead(
+                item.SkillPath,
+                item.ReferenceSkillName is not null && state.Active.TryGetValue(item.ReferenceSkillName, out var target)
+                    ? target
+                    : null),
+            StringComparer.Ordinal);
+        var requestedOffset = checkpoint is null || checkpoint.ParserVersion != ParserVersion ? 0 : checkpoint.Offset;
+        var replaceExisting = checkpoint is null || checkpoint.ParserVersion != ParserVersion;
+        var read = await _incrementalReader.ReadAsync(
             rolloutPath,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.ReadWrite | FileShare.Delete,
-            64 * 1024,
-            useAsync: true);
-        using var reader = new StreamReader(stream);
-        while (!reader.EndOfStream)
+            requestedOffset,
+            line => ProcessLine(line),
+            cancellationToken);
+        replaceExisting |= read.OffsetWasReset;
+        var info = new FileInfo(rolloutPath);
+        state.PendingCalls = pendingCalls.Select(item => new PendingCallState(
+            item.Key,
+            item.Value.SkillPath,
+            item.Value.ReferenceTarget?.SkillName)).ToList();
+        return new SkillRolloutDelta(
+            rolloutPath,
+            read.NextOffset,
+            info.Length,
+            info.LastWriteTimeUtc.Ticks,
+            JsonSerializer.Serialize(state.ToPersisted(), StateJsonOptions),
+            replaceExisting,
+            read.CompleteLines,
+            read.OversizedLines,
+            changedInvocations.Values.Select(item => item.ToSnapshot()).ToArray(),
+            attributions);
+
+        void ProcessLine(ReadOnlyMemory<byte> line)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var line = await reader.ReadLineAsync(cancellationToken);
-            if (string.IsNullOrWhiteSpace(line))
+            if (line.IsEmpty)
             {
-                continue;
+                return;
             }
 
             try
@@ -195,7 +232,7 @@ public sealed partial class SkillUsageAnalyzer(SkillTokenCounter tokenCounter, R
                 if (!root.TryGetProperty("type", out var typeElement) ||
                     !root.TryGetProperty("payload", out var payload))
                 {
-                    continue;
+                    return;
                 }
 
                 var type = typeElement.GetString();
@@ -203,32 +240,32 @@ public sealed partial class SkillUsageAnalyzer(SkillTokenCounter tokenCounter, R
                 var timestamp = ParseTimestamp(root);
                 if (type == "session_meta")
                 {
-                    sessionId = GetString(payload, "session_id") ?? GetString(payload, "id") ?? sessionId;
-                    continue;
+                    state.SessionId = GetString(payload, "session_id") ?? GetString(payload, "id") ?? state.SessionId;
+                    return;
                 }
 
                 if (type == "turn_context")
                 {
                     EndTask(timestamp);
-                    currentTask = GetString(payload, "turn_id") ?? currentTask;
-                    currentModel = GetString(payload, "model") ?? currentModel;
-                    previousTotal = null;
-                    continue;
+                    state.CurrentTask = GetString(payload, "turn_id") ?? state.CurrentTask;
+                    state.CurrentModel = GetString(payload, "model") ?? state.CurrentModel;
+                    state.PreviousTotal = null;
+                    return;
                 }
 
                 if (type == "event_msg" && payloadType == "task_started")
                 {
                     EndTask(timestamp);
-                    currentTask = GetString(payload, "turn_id") ?? currentTask;
-                    previousTotal = null;
-                    continue;
+                    state.CurrentTask = GetString(payload, "turn_id") ?? state.CurrentTask;
+                    state.PreviousTotal = null;
+                    return;
                 }
 
                 if (type == "event_msg" && payloadType == "task_complete")
                 {
                     EndTask(timestamp);
-                    previousTotal = null;
-                    continue;
+                    state.PreviousTotal = null;
+                    return;
                 }
 
                 if (type == "response_item" && payloadType == "custom_tool_call")
@@ -239,14 +276,14 @@ public sealed partial class SkillUsageAnalyzer(SkillTokenCounter tokenCounter, R
                     if (callId is not null && path is not null)
                     {
                         pendingCalls[callId] = new PendingSkillRead(path, null);
-                        candidateSkillTask = true;
+                        state.CandidateSkillTask = true;
                     }
-                    else if (callId is not null && FindActiveReferenceTarget(input, active.Values) is { } target)
+                    else if (callId is not null && FindActiveReferenceTarget(input, state.Active.Values) is { } target)
                     {
                         pendingCalls[callId] = new PendingSkillRead(null, target);
                     }
 
-                    continue;
+                    return;
                 }
 
                 if (type == "response_item" && payloadType == "custom_tool_call_output")
@@ -261,44 +298,45 @@ public sealed partial class SkillUsageAnalyzer(SkillTokenCounter tokenCounter, R
                             var highConfidence = output.Contains("name:", StringComparison.OrdinalIgnoreCase) &&
                                 output.Contains(definition.Name, StringComparison.OrdinalIgnoreCase);
                             var builder = new InvocationBuilder(
-                                sessionId,
+                                state.SessionId,
                                 rolloutPath,
-                                currentTask,
+                                state.CurrentTask,
                                 definition,
                                 highConfidence ? "high" : "medium",
                                 timestamp,
-                                currentModel,
+                                state.CurrentModel,
                                 highConfidence ? definition.BaseTokens : 0,
                                 highConfidence ? "complete_skill_read" : "verified_skill_path");
-                            invocations.Add(builder);
-                            active[definition.Name] = builder;
+                            state.Active[definition.Name] = builder;
+                            TrackChanged(builder);
                         }
                         else if (pendingRead.ReferenceTarget is not null && output.Length > 0)
                         {
                             pendingRead.ReferenceTarget.AddLoadedTokens(tokenCounter.Count(output).Tokens);
+                            TrackChanged(pendingRead.ReferenceTarget);
                         }
                     }
 
-                    continue;
+                    return;
                 }
 
-                if (line.Contains("\"total_token_usage\"", StringComparison.Ordinal) &&
-                    tokenParser.TryParse(Encoding.UTF8.GetBytes(line), out var parsed, out _) &&
+                if (line.Span.IndexOf("\"total_token_usage\""u8) >= 0 &&
+                    tokenParser.TryParse(line, out var parsed, out _) &&
                     parsed is ParsedTokenEvent tokenEvent)
                 {
-                    if (previousTotal == tokenEvent.TotalUsage)
+                    if (state.PreviousTotal == tokenEvent.TotalUsage)
                     {
-                        continue;
+                        return;
                     }
 
-                    var monotonic = previousTotal is null || IsMonotonic(previousTotal, tokenEvent.TotalUsage);
-                    previousTotal = tokenEvent.TotalUsage;
-                    if (active.Count == 0 && !candidateSkillTask)
+                    var monotonic = state.PreviousTotal is null || IsMonotonic(state.PreviousTotal, tokenEvent.TotalUsage);
+                    state.PreviousTotal = tokenEvent.TotalUsage;
+                    if (state.Active.Count == 0 && !state.CandidateSkillTask)
                     {
-                        continue;
+                        return;
                     }
 
-                    var names = active.Keys.Order(StringComparer.OrdinalIgnoreCase).ToArray();
+                    var names = state.Active.Keys.Order(StringComparer.OrdinalIgnoreCase).ToArray();
                     var bucketType = names.Length switch
                     {
                         0 => "unattributed",
@@ -306,15 +344,15 @@ public sealed partial class SkillUsageAnalyzer(SkillTokenCounter tokenCounter, R
                         _ => "collaboration"
                     };
                     var bucketKey = names.Length == 0 ? "unattributed" : string.Join(" + ", names);
-                    var confidence = !monotonic || active.Values.Any(item => item.Confidence != "high")
+                    var confidence = !monotonic || state.Active.Values.Any(item => item.Confidence != "high")
                         ? "medium"
                         : "high";
                     attributions.Add(new SkillAttributionSnapshot(
-                        sessionId,
+                        state.SessionId,
                         rolloutPath,
-                        currentTask,
+                        state.CurrentTask,
                         tokenEvent.Timestamp,
-                        currentModel,
+                        state.CurrentModel,
                         bucketType,
                         bucketKey,
                         string.Join("|", names),
@@ -324,30 +362,44 @@ public sealed partial class SkillUsageAnalyzer(SkillTokenCounter tokenCounter, R
             }
             catch (JsonException)
             {
-                // Ignore a partially written final line; the changed file is rebuilt later.
+                // A malformed complete line is ignored without losing the following append checkpoint.
             }
         }
-
-        EndTask(DateTimeOffset.UtcNow);
-        var info = new FileInfo(rolloutPath);
-        return new SkillRolloutAnalysis(
-            rolloutPath,
-            info.Length,
-            info.LastWriteTimeUtc.Ticks,
-            invocations.Select(item => item.ToSnapshot()).ToArray(),
-            attributions);
 
         void EndTask(DateTimeOffset endedAt)
         {
-            foreach (var invocation in active.Values)
+            foreach (var invocation in state.Active.Values)
             {
                 invocation.EndedAt ??= endedAt;
+                TrackChanged(invocation);
             }
 
-            active.Clear();
+            state.Active.Clear();
             pendingCalls.Clear();
-            candidateSkillTask = false;
+            state.CandidateSkillTask = false;
         }
+
+        void TrackChanged(InvocationBuilder invocation) => changedInvocations[invocation.Identity] = invocation;
+    }
+
+    private static ParserState ReadState(string? json)
+    {
+        if (!string.IsNullOrWhiteSpace(json))
+        {
+            try
+            {
+                var persisted = JsonSerializer.Deserialize<PersistedParserState>(json, StateJsonOptions);
+                if (persisted is not null)
+                {
+                    return new ParserState(persisted);
+                }
+            }
+            catch (JsonException)
+            {
+            }
+        }
+
+        return new ParserState();
     }
 
     private static bool IsMonotonic(TokenUsage previous, TokenUsage current) =>
@@ -481,6 +533,52 @@ public sealed partial class SkillUsageAnalyzer(SkillTokenCounter tokenCounter, R
 
     private sealed record PendingSkillRead(string? SkillPath, InvocationBuilder? ReferenceTarget);
 
+    private sealed record PendingCallState(string CallId, string? SkillPath, string? ReferenceSkillName);
+
+    private sealed record PersistedParserState(
+        string SessionId,
+        string CurrentTask,
+        string CurrentModel,
+        bool CandidateSkillTask,
+        TokenUsage? PreviousTotal,
+        IReadOnlyList<SkillInvocationSnapshot> Active,
+        IReadOnlyList<PendingCallState> PendingCalls);
+
+    private sealed class ParserState
+    {
+        public ParserState()
+        {
+        }
+
+        public ParserState(PersistedParserState state)
+        {
+            SessionId = state.SessionId;
+            CurrentTask = state.CurrentTask;
+            CurrentModel = state.CurrentModel;
+            CandidateSkillTask = state.CandidateSkillTask;
+            PreviousTotal = state.PreviousTotal;
+            Active = state.Active.ToDictionary(item => item.SkillName, item => new InvocationBuilder(item), StringComparer.OrdinalIgnoreCase);
+            PendingCalls = state.PendingCalls.ToList();
+        }
+
+        public string SessionId { get; set; } = "unknown";
+        public string CurrentTask { get; set; } = "unknown";
+        public string CurrentModel { get; set; } = "unknown";
+        public bool CandidateSkillTask { get; set; }
+        public TokenUsage? PreviousTotal { get; set; }
+        public Dictionary<string, InvocationBuilder> Active { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+        public List<PendingCallState> PendingCalls { get; set; } = [];
+
+        public PersistedParserState ToPersisted() => new(
+            SessionId,
+            CurrentTask,
+            CurrentModel,
+            CandidateSkillTask,
+            PreviousTotal,
+            Active.Values.Select(item => item.ToSnapshot()).ToArray(),
+            PendingCalls);
+    }
+
     private sealed class InvocationBuilder
     {
         private readonly string _sessionId;
@@ -514,8 +612,36 @@ public sealed partial class SkillUsageAnalyzer(SkillTokenCounter tokenCounter, R
             _evidenceKind = evidenceKind;
         }
 
+        public InvocationBuilder(SkillInvocationSnapshot snapshot)
+        {
+            _sessionId = snapshot.SessionId;
+            _rolloutPath = snapshot.RolloutPath;
+            _taskId = snapshot.TaskId;
+            _definition = new SkillDefinitionSnapshot(
+                snapshot.SkillName,
+                snapshot.SkillPath,
+                "persisted",
+                true,
+                snapshot.VersionHash,
+                0,
+                0,
+                snapshot.LoadedTokens,
+                "persisted",
+                "persisted",
+                false,
+                snapshot.StartedAt);
+            Confidence = snapshot.Confidence;
+            _startedAt = snapshot.StartedAt;
+            _model = snapshot.Model;
+            _loadedTokens = snapshot.LoadedTokens;
+            _evidenceKind = snapshot.EvidenceKind;
+            EndedAt = snapshot.EndedAt;
+        }
+
         public string Confidence { get; }
+        public string SkillName => _definition.Name;
         public string SkillPath => _definition.Path;
+        public string Identity => string.Join("|", _rolloutPath, _taskId, _definition.Name, _startedAt.ToString("O"));
         public DateTimeOffset? EndedAt { get; set; }
 
         public void AddLoadedTokens(long tokens) => _loadedTokens += Math.Max(tokens, 0);

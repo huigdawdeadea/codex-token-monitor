@@ -5,8 +5,7 @@ public sealed class DashboardDisplayContractTests
     [Fact]
     public void Dashboard_UsesDesktopConsoleWithMobileFallback()
     {
-        var script = File.ReadAllText(FindRepositoryFile(
-            "src", "CodexTokenMonitor.App", "wwwroot", "app.js"));
+        var script = ReadDashboardScripts();
         var markup = File.ReadAllText(FindRepositoryFile(
             "src", "CodexTokenMonitor.App", "wwwroot", "index.html"));
         var styles = File.ReadAllText(FindRepositoryFile(
@@ -45,8 +44,7 @@ public sealed class DashboardDisplayContractTests
     [Fact]
     public void Overview_DistinguishesCumulativeUsageFromCurrentContext()
     {
-        var script = File.ReadAllText(FindRepositoryFile(
-            "src", "CodexTokenMonitor.App", "wwwroot", "app.js"));
+        var script = ReadDashboardScripts();
         var markup = File.ReadAllText(FindRepositoryFile(
             "src", "CodexTokenMonitor.App", "wwwroot", "index.html"));
         var styles = File.ReadAllText(FindRepositoryFile(
@@ -67,7 +65,7 @@ public sealed class DashboardDisplayContractTests
         Assert.Contains("data-action=\"details\"", script, StringComparison.Ordinal);
         Assert.Contains("function renderSessionDetail()", script, StringComparison.Ordinal);
         Assert.Contains("累计处理量细分", script, StringComparison.Ordinal);
-        Assert.Contains("api(\"/api/usage?days=14\")", script, StringComparison.Ordinal);
+        Assert.Contains("/api/usage?days=14", script, StringComparison.Ordinal);
         Assert.Contains("今日处理量", script, StringComparison.Ordinal);
         Assert.Contains("Token 目录价估算", script, StringComparison.Ordinal);
         Assert.Contains("官方覆盖", script, StringComparison.Ordinal);
@@ -140,7 +138,7 @@ public sealed class DashboardDisplayContractTests
         Assert.Contains("data-ranking-mode=\"days\"", markup, StringComparison.Ordinal);
         Assert.Contains("data-ranking-mode=\"sessions\"", markup, StringComparison.Ordinal);
         Assert.Contains("data-ranking-mode=\"projects\"", markup, StringComparison.Ordinal);
-        Assert.Contains("api(\"/api/rankings?limit=100\")", script, StringComparison.Ordinal);
+        Assert.Contains("/api/rankings?limit=100", script, StringComparison.Ordinal);
         Assert.Contains("function renderRankings()", script, StringComparison.Ordinal);
         Assert.Contains("function dayRankingTable(items)", script, StringComparison.Ordinal);
         Assert.Contains("function sessionRankingTable(items)", script, StringComparison.Ordinal);
@@ -198,6 +196,39 @@ public sealed class DashboardDisplayContractTests
         Assert.DoesNotContain("CURRENT CONTEXT ESTIMATE", script, StringComparison.Ordinal);
         Assert.DoesNotContain("LOCAL ONLY · LOOPBACK", markup, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void Dashboard_LoadsCurrentViewThenSequentiallyPrefetchesAndPollsVersions()
+    {
+        var app = File.ReadAllText(FindRepositoryFile(
+            "src", "CodexTokenMonitor.App", "wwwroot", "app.js"));
+        var coordinator = File.ReadAllText(FindRepositoryFile(
+            "src", "CodexTokenMonitor.App", "wwwroot", "refresh-coordinator.js"));
+        var markup = File.ReadAllText(FindRepositoryFile(
+            "src", "CodexTokenMonitor.App", "wwwroot", "index.html"));
+        var server = File.ReadAllText(FindRepositoryFile(
+            "src", "CodexTokenMonitor.App", "WebDashboardServer.cs"));
+
+        Assert.Contains("/refresh-coordinator.js", markup, StringComparison.Ordinal);
+        Assert.Contains("/api/data-version", coordinator, StringComparison.Ordinal);
+        Assert.Contains("await loadView(state.view, true, true)", coordinator, StringComparison.Ordinal);
+        Assert.Contains("for (const view of prefetchOrder)", coordinator, StringComparison.Ordinal);
+        Assert.Contains("await loadView(view, false", coordinator, StringComparison.Ordinal);
+        Assert.Contains("document.hidden", coordinator, StringComparison.Ordinal);
+        Assert.Contains("visibilitychange", coordinator, StringComparison.Ordinal);
+        Assert.Contains("window.setTimeout(pollDataVersions, 3000)", coordinator, StringComparison.Ordinal);
+        Assert.DoesNotContain("setInterval(refreshAll, 3000)", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("Promise.all([", app, StringComparison.Ordinal);
+        Assert.Contains("sessionVisibleCount: 50", app, StringComparison.Ordinal);
+        Assert.Contains("load-more-sessions", app, StringComparison.Ordinal);
+        Assert.Contains("id=\"rebuild-derived\"", markup, StringComparison.Ordinal);
+        Assert.Contains("/api/rebuild", server, StringComparison.Ordinal);
+    }
+
+    private static string ReadDashboardScripts() => string.Concat(
+        File.ReadAllText(FindRepositoryFile("src", "CodexTokenMonitor.App", "wwwroot", "app.js")),
+        "\n",
+        File.ReadAllText(FindRepositoryFile("src", "CodexTokenMonitor.App", "wwwroot", "refresh-coordinator.js")));
 
     private static string FindRepositoryFile(params string[] segments)
     {

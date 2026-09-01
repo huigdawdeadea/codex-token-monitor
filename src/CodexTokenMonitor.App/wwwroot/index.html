@@ -153,6 +153,11 @@
               <button type="button" class="danger-button" id="clear-history">清除监控历史</button>
             </div>
           </article>
+          <article class="settings-card">
+            <span class="card-number">D</span><h3>高级维护</h3>
+            <p id="rebuild-status">只重建读取断点、Skills 归因和页面缓存，不删除历史 token 事实。</p>
+            <button type="button" class="secondary-button" id="rebuild-derived">重建派生索引</button>
+          </article>
           <div class="form-actions">
             <button type="submit" class="primary-button">保存设置</button>
           </div>
@@ -166,5 +171,6 @@
     <div id="session-detail-content"></div>
   </dialog>
   <script src="/app.js" defer></script>
+  <script src="/refresh-coordinator.js" defer></script>
 </body>
 </html>

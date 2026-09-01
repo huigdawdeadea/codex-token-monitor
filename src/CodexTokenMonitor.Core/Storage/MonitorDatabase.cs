@@ -39,6 +39,8 @@ public sealed partial class MonitorDatabase(string databasePath)
             var skillCommand = connection.CreateCommand();
             skillCommand.CommandText = SkillUsageSchemaSql;
             await skillCommand.ExecuteNonQueryAsync(cancellationToken);
+            await EnsureSkillIncrementalSchemaAsync(connection, cancellationToken);
+            await EnsurePerformanceSchemaAsync(connection, cancellationToken);
         }
         finally
         {
@@ -77,8 +79,12 @@ public sealed partial class MonitorDatabase(string databasePath)
             var previous = await GetSessionAsync(connection, transaction, result.SessionId, cancellationToken);
             var current = Merge(previous, result);
             await UpsertSessionAsync(connection, transaction, current, cancellationToken);
-            await InsertTokenEventsAsync(connection, transaction, result, cancellationToken);
+            var insertedEvents = await InsertTokenEventsAsync(connection, transaction, result, cancellationToken);
             await UpsertCheckpointAsync(connection, transaction, result, cancellationToken);
+            var changedSections = insertedEvents > 0
+                ? new[] { "overview", "sessions", "models", "usage", "rankings" }
+                : new[] { "overview", "sessions", "models" };
+            await BumpDataVersionsAsync(connection, transaction, changedSections, cancellationToken);
             await transaction.CommitAsync(cancellationToken);
             return (previous, current);
         }
@@ -1714,7 +1720,7 @@ public sealed partial class MonitorDatabase(string databasePath)
         return result;
     }
 
-    private static async Task InsertTokenEventsAsync(
+    private static async Task<int> InsertTokenEventsAsync(
         SqliteConnection connection,
         SqliteTransaction transaction,
         RolloutFileResult result,
@@ -1739,6 +1745,7 @@ public sealed partial class MonitorDatabase(string databasePath)
             }
         }
 
+        var insertedEvents = 0;
         foreach (var tokenEvent in events)
         {
             if (previousTotal == tokenEvent.TotalUsage)
@@ -1767,9 +1774,11 @@ public sealed partial class MonitorDatabase(string databasePath)
             command.Parameters.AddWithValue("$event_utc", Format(tokenEvent.Timestamp));
             AddUsageParameters(command, "event", tokenEvent.TotalUsage);
             AddUsageParameters(command, "last", tokenEvent.LastUsage);
-            await command.ExecuteNonQueryAsync(cancellationToken);
+            insertedEvents += await command.ExecuteNonQueryAsync(cancellationToken);
             previousTotal = tokenEvent.TotalUsage;
         }
+
+        return insertedEvents;
     }
 
     private static async Task EnsureTokenUsageEventsSchemaAsync(

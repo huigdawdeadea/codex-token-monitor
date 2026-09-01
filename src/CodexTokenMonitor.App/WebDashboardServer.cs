@@ -41,6 +41,7 @@ internal sealed class WebDashboardServer(
 
     private readonly string _controlToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
     private readonly SessionQuestionDetailReader _questionDetailReader = new(new RolloutEventParser());
+    private readonly MaterializedQueryCache _queryCache = new(database);
     private WebApplication? _application;
     private int _stopping;
 
@@ -118,6 +119,9 @@ internal sealed class WebDashboardServer(
             controlToken = _controlToken,
             version = typeof(WebDashboardServer).Assembly.GetName().Version?.ToString(3) ?? "0.0.0"
         }));
+
+        app.MapGet("/api/data-version", async (CancellationToken cancellationToken) =>
+            Results.Ok(await database.GetDataVersionsAsync(cancellationToken)));
 
         app.MapGet("/api/dashboard", async (CancellationToken cancellationToken) =>
         {
@@ -209,9 +213,13 @@ internal sealed class WebDashboardServer(
                 submitted.HumanMinutes,
                 reworkReason,
                 DateTimeOffset.UtcNow);
-            return await database.SaveSessionAnnotationAsync(sessionId, annotation, cancellationToken)
-                ? Results.Ok(annotation)
-                : Results.NotFound(new { error = "session_not_found" });
+            if (!await database.SaveSessionAnnotationAsync(sessionId, annotation, cancellationToken))
+            {
+                return Results.NotFound(new { error = "session_not_found" });
+            }
+
+            await database.NotifyDataChangedAsync(["sessions", "usage", "rankings"], cancellationToken);
+            return Results.Ok(annotation);
         });
 
         app.MapGet("/api/models", async (CancellationToken cancellationToken) =>
@@ -219,7 +227,13 @@ internal sealed class WebDashboardServer(
 
         app.MapGet("/api/usage", async (int? days, CancellationToken cancellationToken) =>
         {
-            var summary = await database.GetUsageSummaryAsync(days ?? 14, cancellationToken);
+            var selectedDays = days ?? 14;
+            var versions = await database.GetDataVersionsAsync(cancellationToken);
+            var summary = await _queryCache.GetOrCreateAsync(
+                $"usage:{selectedDays}",
+                versions.Usage.ToString(),
+                token => database.GetUsageSummaryAsync(selectedDays, token),
+                cancellationToken);
             var pricingStatus = await pricingCoordinator.GetStatusAsync(cancellationToken);
             return Results.Ok(summary with
             {
@@ -235,11 +249,24 @@ internal sealed class WebDashboardServer(
                 return Results.BadRequest(new { error = "invalid_date" });
             }
 
-            return Results.Ok(await database.GetDailyUsageAnalysisAsync(selectedDate, cancellationToken: cancellationToken));
+            var versions = await database.GetDataVersionsAsync(cancellationToken);
+            return Results.Ok(await _queryCache.GetOrCreateAsync(
+                $"usage-analysis:{selectedDate:yyyy-MM-dd}",
+                versions.Usage.ToString(),
+                token => database.GetDailyUsageAnalysisAsync(selectedDate, cancellationToken: token),
+                cancellationToken));
         });
 
         app.MapGet("/api/rankings", async (int? limit, CancellationToken cancellationToken) =>
-            Results.Ok(await database.GetUsageRankingsAsync(limit ?? 100, cancellationToken)));
+        {
+            var selectedLimit = limit ?? 100;
+            var versions = await database.GetDataVersionsAsync(cancellationToken);
+            return Results.Ok(await _queryCache.GetOrCreateAsync(
+                $"rankings:{selectedLimit}",
+                versions.Rankings.ToString(),
+                token => database.GetUsageRankingsAsync(selectedLimit, token),
+                cancellationToken));
+        });
 
         app.MapGet("/api/rankings/projects/daily", async (string? date, CancellationToken cancellationToken) =>
         {
@@ -255,7 +282,12 @@ internal sealed class WebDashboardServer(
                 return Results.BadRequest(new { error = "future_date" });
             }
 
-            return Results.Ok(await database.GetDailyProjectUsageAsync(selectedDate, cancellationToken));
+            var versions = await database.GetDataVersionsAsync(cancellationToken);
+            return Results.Ok(await _queryCache.GetOrCreateAsync(
+                $"daily-projects:{selectedDate:yyyy-MM-dd}",
+                versions.Rankings.ToString(),
+                token => database.GetDailyProjectUsageAsync(selectedDate, token),
+                cancellationToken));
         });
 
         app.MapGet("/api/skills", async (
@@ -265,10 +297,17 @@ internal sealed class WebDashboardServer(
             CancellationToken cancellationToken) =>
         {
             var confidenceFilter = confidence is "all" or "medium" ? confidence : "high";
-            return Results.Ok(await database.GetSkillUsageSummaryAsync(
-                days ?? 0,
-                confidenceFilter,
-                string.IsNullOrWhiteSpace(model) ? null : model,
+            var selectedDays = days ?? 0;
+            var selectedModel = string.IsNullOrWhiteSpace(model) ? null : model;
+            var versions = await database.GetDataVersionsAsync(cancellationToken);
+            return Results.Ok(await _queryCache.GetOrCreateAsync(
+                $"skills:{selectedDays}:{confidenceFilter}:{selectedModel ?? "all"}",
+                versions.Skills.ToString(),
+                token => database.GetSkillUsageSummaryAsync(
+                    selectedDays,
+                    confidenceFilter,
+                    selectedModel,
+                    token),
                 cancellationToken));
         });
 
@@ -295,6 +334,7 @@ internal sealed class WebDashboardServer(
 
             var settings = submitted.Normalize();
             await database.SaveSettingsAsync(settings, cancellationToken);
+            await database.NotifyDataChangedAsync(["settings", "overview", "sessions"], cancellationToken);
             monitor.RequestRefresh();
             return Results.Ok(settings);
         });
@@ -310,6 +350,20 @@ internal sealed class WebDashboardServer(
             return Results.Accepted();
         });
 
+        app.MapGet("/api/rebuild", () => Results.Ok(monitor.GetRebuildStatus()));
+
+        app.MapPost("/api/rebuild", (HttpRequest request) =>
+        {
+            if (!HasValidControlToken(request))
+            {
+                return Results.Unauthorized();
+            }
+
+            return monitor.RequestFullRebuild()
+                ? Results.Accepted(value: monitor.GetRebuildStatus())
+                : Results.Conflict(new { error = "rebuild_already_queued", status = monitor.GetRebuildStatus() });
+        });
+
         app.MapGet("/api/pricing", async (CancellationToken cancellationToken) =>
             Results.Ok(await pricingCoordinator.GetStatusAsync(cancellationToken)));
 
@@ -322,7 +376,12 @@ internal sealed class WebDashboardServer(
                 return Results.Unauthorized();
             }
 
-            return Results.Ok(await pricingCoordinator.RefreshNowAsync(cancellationToken));
+            var result = await pricingCoordinator.RefreshNowAsync(cancellationToken);
+            await database.NotifyDataChangedAsync(
+                ["overview", "sessions", "usage", "rankings", "skills"],
+                cancellationToken);
+
+            return Results.Ok(result);
         });
 
         app.MapPost("/api/startup", (HttpRequest request, StartupRequest body) =>
@@ -346,6 +405,7 @@ internal sealed class WebDashboardServer(
             }
 
             await database.DeleteAllTitlesAsync(cancellationToken);
+            await database.NotifyDataChangedAsync(["overview", "sessions", "rankings"], cancellationToken);
             return Results.NoContent();
         });
 
@@ -357,6 +417,9 @@ internal sealed class WebDashboardServer(
             }
 
             await database.ClearHistoryAsync(cancellationToken);
+            await database.NotifyDataChangedAsync(
+                ["overview", "sessions", "models", "usage", "rankings", "skills"],
+                cancellationToken);
             return Results.NoContent();
         });
     }

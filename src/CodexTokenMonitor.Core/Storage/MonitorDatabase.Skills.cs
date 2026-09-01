@@ -105,8 +105,52 @@ public sealed partial class MonitorDatabase
             reader.GetInt32(2) != parserVersion;
     }
 
+    public async Task<SkillScanCheckpoint?> GetSkillScanCheckpointAsync(
+        string path,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT offset, length, last_write_utc_ticks, parser_version, state_json
+            FROM skill_scan_checkpoints WHERE path=$path
+            """;
+        command.Parameters.AddWithValue("$path", path);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken)
+            ? new SkillScanCheckpoint(
+                path,
+                reader.GetInt64(0),
+                reader.GetInt64(1),
+                reader.GetInt64(2),
+                reader.GetInt32(3),
+                reader.GetString(4))
+            : null;
+    }
+
     public async Task ReplaceSkillRolloutAsync(
         SkillRolloutAnalysis analysis,
+        int parserVersion,
+        CancellationToken cancellationToken = default)
+    {
+        await ApplySkillRolloutDeltaAsync(
+            new SkillRolloutDelta(
+                analysis.RolloutPath,
+                analysis.Length,
+                analysis.Length,
+                analysis.LastWriteUtcTicks,
+                "",
+                true,
+                0,
+                0,
+                analysis.Invocations,
+                analysis.Attributions),
+            parserVersion,
+            cancellationToken);
+    }
+
+    public async Task ApplySkillRolloutDeltaAsync(
+        SkillRolloutDelta delta,
         int parserVersion,
         CancellationToken cancellationToken = default)
     {
@@ -115,16 +159,19 @@ public sealed partial class MonitorDatabase
         {
             await using var connection = await OpenAsync(cancellationToken);
             await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
-            foreach (var table in new[] { "skill_invocations", "skill_attribution_events" })
+            if (delta.ReplaceExisting)
             {
-                var delete = connection.CreateCommand();
-                delete.Transaction = transaction;
-                delete.CommandText = $"DELETE FROM {table} WHERE rollout_path=$path";
-                delete.Parameters.AddWithValue("$path", analysis.RolloutPath);
-                await delete.ExecuteNonQueryAsync(cancellationToken);
+                foreach (var table in new[] { "skill_invocations", "skill_attribution_events" })
+                {
+                    var delete = connection.CreateCommand();
+                    delete.Transaction = transaction;
+                    delete.CommandText = $"DELETE FROM {table} WHERE rollout_path=$path";
+                    delete.Parameters.AddWithValue("$path", delta.RolloutPath);
+                    await delete.ExecuteNonQueryAsync(cancellationToken);
+                }
             }
 
-            foreach (var invocation in analysis.Invocations)
+            foreach (var invocation in delta.Invocations)
             {
                 var command = connection.CreateCommand();
                 command.Transaction = transaction;
@@ -134,6 +181,11 @@ public sealed partial class MonitorDatabase
                         confidence, started_utc, ended_utc, model, loaded_tokens, evidence_kind)
                     VALUES($session, $path, $task, $name, $skill_path, $hash,
                         $confidence, $started, $ended, $model, $loaded, $evidence)
+                    ON CONFLICT(rollout_path, task_id, skill_name, started_utc) DO UPDATE SET
+                        session_id=excluded.session_id, skill_path=excluded.skill_path,
+                        version_hash=excluded.version_hash, confidence=excluded.confidence,
+                        ended_utc=excluded.ended_utc, model=excluded.model,
+                        loaded_tokens=excluded.loaded_tokens, evidence_kind=excluded.evidence_kind
                     """;
                 command.Parameters.AddWithValue("$session", invocation.SessionId);
                 command.Parameters.AddWithValue("$path", invocation.RolloutPath);
@@ -150,12 +202,12 @@ public sealed partial class MonitorDatabase
                 await command.ExecuteNonQueryAsync(cancellationToken);
             }
 
-            foreach (var attribution in analysis.Attributions)
+            foreach (var attribution in delta.Attributions)
             {
                 var command = connection.CreateCommand();
                 command.Transaction = transaction;
                 command.CommandText = """
-                    INSERT INTO skill_attribution_events(
+                    INSERT OR IGNORE INTO skill_attribution_events(
                         session_id, rollout_path, task_id, event_utc, model, bucket_type, bucket_key,
                         skill_names, confidence, input_tokens, cached_input_tokens, cache_write_input_tokens,
                         output_tokens, reasoning_output_tokens, total_tokens)
@@ -183,17 +235,25 @@ public sealed partial class MonitorDatabase
             var checkpoint = connection.CreateCommand();
             checkpoint.Transaction = transaction;
             checkpoint.CommandText = """
-                INSERT INTO skill_scan_checkpoints(path, length, last_write_utc_ticks, parser_version, updated_utc)
-                VALUES($path, $length, $ticks, $version, $updated)
-                ON CONFLICT(path) DO UPDATE SET length=excluded.length, last_write_utc_ticks=excluded.last_write_utc_ticks,
-                    parser_version=excluded.parser_version, updated_utc=excluded.updated_utc
+                INSERT INTO skill_scan_checkpoints(path, offset, length, last_write_utc_ticks, parser_version, state_json, updated_utc)
+                VALUES($path, $offset, $length, $ticks, $version, $state, $updated)
+                ON CONFLICT(path) DO UPDATE SET offset=excluded.offset, length=excluded.length,
+                    last_write_utc_ticks=excluded.last_write_utc_ticks, parser_version=excluded.parser_version,
+                    state_json=excluded.state_json, updated_utc=excluded.updated_utc
                 """;
-            checkpoint.Parameters.AddWithValue("$path", analysis.RolloutPath);
-            checkpoint.Parameters.AddWithValue("$length", analysis.Length);
-            checkpoint.Parameters.AddWithValue("$ticks", analysis.LastWriteUtcTicks);
+            checkpoint.Parameters.AddWithValue("$path", delta.RolloutPath);
+            checkpoint.Parameters.AddWithValue("$offset", delta.Offset);
+            checkpoint.Parameters.AddWithValue("$length", delta.Length);
+            checkpoint.Parameters.AddWithValue("$ticks", delta.LastWriteUtcTicks);
             checkpoint.Parameters.AddWithValue("$version", parserVersion);
+            checkpoint.Parameters.AddWithValue("$state", delta.StateJson);
             checkpoint.Parameters.AddWithValue("$updated", Format(DateTimeOffset.UtcNow));
             await checkpoint.ExecuteNonQueryAsync(cancellationToken);
+            if (delta.ReplaceExisting || delta.Invocations.Count > 0 || delta.Attributions.Count > 0)
+            {
+                await BumpDataVersionsAsync(connection, transaction, ["skills"], cancellationToken);
+            }
+
             await transaction.CommitAsync(cancellationToken);
         }
         finally
@@ -451,6 +511,62 @@ public sealed partial class MonitorDatabase
             catalog);
     }
 
+    private static async Task EnsureSkillIncrementalSchemaAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        var inspect = connection.CreateCommand();
+        inspect.CommandText = "PRAGMA table_info(skill_scan_checkpoints)";
+        var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await using (var reader = await inspect.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                columns.Add(reader.GetString(1));
+            }
+        }
+
+        if (!columns.Contains("offset"))
+        {
+            var addOffset = connection.CreateCommand();
+            addOffset.CommandText = "ALTER TABLE skill_scan_checkpoints ADD COLUMN offset INTEGER NOT NULL DEFAULT 0";
+            await addOffset.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        if (!columns.Contains("state_json"))
+        {
+            var addState = connection.CreateCommand();
+            addState.CommandText = "ALTER TABLE skill_scan_checkpoints ADD COLUMN state_json TEXT NOT NULL DEFAULT ''";
+            await addState.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        var deduplicate = connection.CreateCommand();
+        deduplicate.CommandText = """
+            DELETE FROM skill_invocations
+            WHERE id IN (
+                SELECT id FROM (
+                    SELECT id, ROW_NUMBER() OVER (
+                        PARTITION BY rollout_path, task_id, skill_name, started_utc
+                        ORDER BY (ended_utc IS NOT NULL) DESC, loaded_tokens DESC,
+                                 (confidence = 'high') DESC, id DESC) AS duplicate_rank
+                    FROM skill_invocations)
+                WHERE duplicate_rank > 1);
+            """;
+        await deduplicate.ExecuteNonQueryAsync(cancellationToken);
+
+        var indexes = connection.CreateCommand();
+        indexes.CommandText = """
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_skill_invocation_identity
+            ON skill_invocations(rollout_path, task_id, skill_name, started_utc);
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_skill_attribution_identity
+            ON skill_attribution_events(
+                rollout_path, task_id, event_utc, model, bucket_type, bucket_key,
+                confidence, input_tokens, cached_input_tokens, cache_write_input_tokens,
+                output_tokens, reasoning_output_tokens, total_tokens);
+            """;
+        await indexes.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     private const string SkillUsageSchemaSql = """
         CREATE TABLE IF NOT EXISTS skill_definitions(
             path TEXT PRIMARY KEY, name TEXT NOT NULL, source_kind TEXT NOT NULL, is_active INTEGER NOT NULL,
@@ -483,7 +599,8 @@ public sealed partial class MonitorDatabase
         CREATE INDEX IF NOT EXISTS ix_skill_attribution_time ON skill_attribution_events(event_utc, bucket_type);
 
         CREATE TABLE IF NOT EXISTS skill_scan_checkpoints(
-            path TEXT PRIMARY KEY, length INTEGER NOT NULL, last_write_utc_ticks INTEGER NOT NULL,
-            parser_version INTEGER NOT NULL, updated_utc TEXT NOT NULL);
+            path TEXT PRIMARY KEY, offset INTEGER NOT NULL DEFAULT 0, length INTEGER NOT NULL,
+            last_write_utc_ticks INTEGER NOT NULL, parser_version INTEGER NOT NULL,
+            state_json TEXT NOT NULL DEFAULT '', updated_utc TEXT NOT NULL);
         """;
 }
