@@ -9,7 +9,7 @@ public sealed record SessionQuestionDetail(
     string Model,
     int ModelCallCount,
     TokenUsage Usage,
-    decimal EstimatedCostUsd,
+    decimal EstimatedCostCny,
     bool IsCostPriced);
 
 public sealed record SessionQuestionHistory(

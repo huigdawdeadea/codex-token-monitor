@@ -34,8 +34,8 @@ public sealed class DashboardDisplayContractTests
         Assert.Contains("/api/skills?confidence=high", script, StringComparison.Ordinal);
         Assert.Contains("function renderSkills()", script, StringComparison.Ordinal);
         Assert.Contains("function renderSkillDetail()", script, StringComparison.Ordinal);
-        Assert.Contains("skill.estimatedCostUsd", script, StringComparison.Ordinal);
-        Assert.Contains("item.estimatedCostUsd", script, StringComparison.Ordinal);
+        Assert.Contains("skill.estimatedCostCny", script, StringComparison.Ordinal);
+        Assert.Contains("item.estimatedCostCny", script, StringComparison.Ordinal);
         Assert.Contains(".skill-table { min-width: 1050px; }", styles, StringComparison.Ordinal);
         Assert.Contains(".skills-toolbar { grid-template-columns: 1fr; }", styles, StringComparison.Ordinal);
         Assert.Contains(".skill-version-grid, .skill-detail-columns { grid-template-columns: 1fr; }", styles, StringComparison.Ordinal);
@@ -79,7 +79,11 @@ public sealed class DashboardDisplayContractTests
         Assert.Contains("[\"每月\", \"月 token\", estimate.monthly]", script, StringComparison.Ordinal);
         Assert.DoesNotContain(">周期 token<", script, StringComparison.Ordinal);
         Assert.Contains("不是 Codex Desktop、ChatGPT 订阅或账户实际扣款", script, StringComparison.Ordinal);
-        Assert.Contains("formatUsd(period.estimatedCostUsd)", script, StringComparison.Ordinal);
+        Assert.Contains("formatCny(period.estimatedCostCny)", script, StringComparison.Ordinal);
+        Assert.Contains("function formatCny(", script, StringComparison.Ordinal);
+        Assert.Contains("deepseek_official_builtin", script, StringComparison.Ordinal);
+        Assert.Contains("1 USD = 6.70 CNY", script, StringComparison.Ordinal);
+        Assert.Contains("deepseek-v4-pro", script, StringComparison.Ordinal);
         Assert.Contains("period.unpricedTokens", script, StringComparison.Ordinal);
         Assert.Contains("session.cost?.isPriced", script, StringComparison.Ordinal);
         Assert.Contains("会话 API 等值参考成本", script, StringComparison.Ordinal);
@@ -210,6 +214,10 @@ public sealed class DashboardDisplayContractTests
             "src", "CodexTokenMonitor.App", "WebDashboardServer.cs"));
 
         Assert.Contains("/refresh-coordinator.js", markup, StringComparison.Ordinal);
+        var coordinatorScriptIndex = markup.IndexOf("/refresh-coordinator.js", StringComparison.Ordinal);
+        var appScriptIndex = markup.IndexOf("/app.js", StringComparison.Ordinal);
+        Assert.True(coordinatorScriptIndex >= 0 && appScriptIndex >= 0);
+        Assert.True(coordinatorScriptIndex < appScriptIndex);
         Assert.Contains("/api/data-version", coordinator, StringComparison.Ordinal);
         Assert.Contains("await loadView(state.view, true, true)", coordinator, StringComparison.Ordinal);
         Assert.Contains("for (const view of prefetchOrder)", coordinator, StringComparison.Ordinal);

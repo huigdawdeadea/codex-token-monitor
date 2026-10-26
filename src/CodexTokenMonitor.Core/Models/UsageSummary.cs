@@ -10,7 +10,7 @@ public sealed record ModelUsageCost(
     TokenUsage Usage,
     long UncachedInputTokens,
     long PricedTokens,
-    decimal EstimatedCostUsd,
+    decimal EstimatedCostCny,
     bool IsPriced,
     IReadOnlyList<PriceCoverageSummary>? Coverage = null,
     bool HasBackfilledPrice = false);
@@ -21,17 +21,17 @@ public sealed record UsageCostPeriod(
     TokenUsage Usage,
     long PricedTokens,
     long UnpricedTokens,
-    decimal EstimatedCostUsd,
+    decimal EstimatedCostCny,
     IReadOnlyList<ModelUsageCost> Models,
     IReadOnlyList<PriceCoverageSummary>? Coverage = null,
     long OfficialPricedTokens = 0,
-    decimal OfficialEstimatedCostUsd = 0m);
+    decimal OfficialEstimatedCostCny = 0m);
 
 public sealed record ModelPriceRate(
     string Model,
-    decimal InputUsdPerMillion,
-    decimal CachedInputUsdPerMillion,
-    decimal OutputUsdPerMillion,
+    decimal InputCnyPerMillion,
+    decimal CachedInputCnyPerMillion,
+    decimal OutputCnyPerMillion,
     string SourceKind = PriceSourceKinds.BuiltInDefault,
     DateTimeOffset? EffectiveFrom = null);
 
@@ -88,7 +88,7 @@ public sealed record ProjectUsageRanking(
     int SessionCount,
     int ModelCount,
     TokenUsage Usage,
-    decimal EstimatedCostUsd,
+    decimal EstimatedCostCny,
     long UnpricedTokens,
     DateTimeOffset LastActivityAt);
 

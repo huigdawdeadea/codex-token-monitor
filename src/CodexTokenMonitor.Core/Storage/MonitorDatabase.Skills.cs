@@ -367,7 +367,7 @@ public sealed partial class MonitorDatabase
                     events[0].SkillNames,
                     events.Length,
                     SumSkillUsage(events.Select(item => item.Usage)),
-                    cost.EstimatedCostUsd,
+                    cost.EstimatedCostCny,
                     cost.UnpricedTokens,
                     events.Max(item => item.EventAt));
             })
@@ -394,7 +394,7 @@ public sealed partial class MonitorDatabase
                 calls.Length == 0 ? 0 : (long)calls.Average(item => item.LoadedTokens),
                 SumSkillUsage(exclusive.Select(item => item.Usage)),
                 SumSkillUsage(collaborative.Select(item => item.Usage)),
-                cost.EstimatedCostUsd,
+                cost.EstimatedCostCny,
                 cost.UnpricedTokens,
                 calls.Length == 0 ? null : calls.Max(item => item.StartedAt),
                 definitionVersions.Where((_, index) => versionNames[index].Equals(name, StringComparison.OrdinalIgnoreCase))

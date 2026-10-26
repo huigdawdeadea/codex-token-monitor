@@ -883,7 +883,7 @@ public sealed partial class MonitorDatabase(string databasePath)
                     group.Count(),
                     group.Select(row => row.Model).Distinct(StringComparer.OrdinalIgnoreCase).Count(),
                     usage,
-                    modelCosts.Sum(cost => cost.EstimatedCostUsd),
+                    modelCosts.Sum(cost => cost.EstimatedCostCny),
                     modelCosts.Where(cost => !cost.IsPriced).Sum(cost => cost.Usage.TotalTokens),
                     group.Max(row => row.LastActivityAt));
             })
@@ -1389,7 +1389,7 @@ public sealed partial class MonitorDatabase(string databasePath)
                         period.Usage,
                         period.Models.Sum(model => model.UncachedInputTokens),
                         period.PricedTokens,
-                        period.EstimatedCostUsd,
+                        period.EstimatedCostCny,
                         period.PricedTokens > 0,
                         period.Coverage,
                         period.Models.Any(model => model.HasBackfilledPrice));
@@ -1673,7 +1673,7 @@ public sealed partial class MonitorDatabase(string databasePath)
             UsageCostEstimator.EstimateTimedPeriod(weekStart, today, weeklyUsage, catalog),
             UsageCostEstimator.EstimateTimedPeriod(monthStart, today, monthlyUsage, catalog),
             currentRates,
-            "USD",
+            "CNY",
             DateOnly.FromDateTime(latestEffective.UtcDateTime),
             calculatedAt);
     }

@@ -114,10 +114,10 @@ function formatTokens(value) {
   return formatExact(number);
 }
 
-function formatUsd(value) {
+function formatCny(value) {
   const amount = Number(value || 0);
   const digits = amount > 0 && amount < 0.01 ? 4 : 2;
-  return `$${amount.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
+  return `¥${amount.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
 }
 
 function formatTime(value) {
@@ -223,7 +223,7 @@ function renderOverview() {
     <div class="metric-grid">
       ${metricCard("已索引会话", data.totalSessions, "本地只读统计")}
       ${metricCard("最近 7 天", recentSevenDays, "调用级事件合计")}
-      ${metricCard("API 等值参考成本", weeklyEstimate?.estimatedCostUsd == null ? "--" : formatUsd(weeklyEstimate.estimatedCostUsd), "不是实际账单", "accent")}
+      ${metricCard("API 等值参考成本", weeklyEstimate?.estimatedCostCny == null ? "--" : formatCny(weeklyEstimate.estimatedCostCny), "不是实际账单", "accent")}
       ${metricCard("已标记任务覆盖率", `${annotationCoverage.toFixed(0)}%`, "完成、返工与结果")}
     </div>
     <div class="subsection-head"><div><span class="section-number">02</span><h3>最近会话</h3></div><p>按最后活动时间排列 · 静止不代表已经结束</p></div>
@@ -248,7 +248,7 @@ function costCoverageNote(cost, usage, completeLabel = "API 等值") {
 
 function sessionCard(session) {
   const pressure = session.estimatedContextPercent ?? 0;
-  const cost = session.cost?.isPriced ? formatUsd(session.cost.estimatedCostUsd) : "无法计价";
+  const cost = session.cost?.isPriced ? formatCny(session.cost.estimatedCostCny) : "无法计价";
   const costNote = session.cost?.isPriced ? costCoverageNote(session.cost, session.totalUsage) : "无法计价";
   return `<article class="session-card"><div class="session-card-top"><span class="state-pill ${session.isActive ? "active" : ""}">${session.isActive ? "活动" : "静止"}</span><small>${formatTime(session.lastActivityAt)}</small></div><div class="session-name">${escapeHtml(visibleSessionName(session))}</div><strong>${formatTokens(session.totalUsage.totalTokens)}</strong><small>累计处理量 · 当前上下文 ${session.estimatedContextPercent ?? "--"}%</small><div class="session-cost-line"><span>${escapeHtml(session.model)}</span><b>${cost}</b></div><small class="session-cost-note">${costNote}</small><div class="mini-pressure ${pressureClass(pressure)}"><i class="analysis-share-level-${widthLevel(pressure)}"></i></div><button class="detail-link" type="button" data-action="details" data-session-id="${escapeHtml(session.sessionId)}">查看详情</button></article>`;
 }
@@ -284,7 +284,7 @@ function renderSessions() {
     <tr>
       <td class="session-cell"><strong>${escapeHtml(visibleSessionName(session))}</strong><small>${escapeHtml(privacyMask ? String(session.sessionId).slice(0, 8) : session.sessionId)} · <span class="state-pill ${session.isActive ? "active" : ""} ${session.dataStatus !== "healthy" ? "degraded" : ""}">${session.dataStatus !== "healthy" ? "异常" : session.isActive ? "活动" : "静止"}</span></small></td>
       <td>${escapeHtml(session.model)}<br><small>${escapeHtml(session.reasoningEffort)}</small></td>
-      <td>${session.cost?.isPriced ? `<strong>${formatUsd(session.cost.estimatedCostUsd)}</strong><br><small>${costCoverageNote(session.cost, session.totalUsage)}</small>` : '<span class="cost-unpriced">无法计价</span>'}</td>
+      <td>${session.cost?.isPriced ? `<strong>${formatCny(session.cost.estimatedCostCny)}</strong><br><small>${costCoverageNote(session.cost, session.totalUsage)}</small>` : '<span class="cost-unpriced">无法计价</span>'}</td>
       <td><strong>${formatTokens(session.totalUsage.totalTokens)}</strong><br><small title="精确值">${formatExact(session.totalUsage.totalTokens)}</small></td>
       <td>${session.estimatedContextPercent ?? "--"}%<br><small>${formatExact(session.lastUsage.totalTokens)} / ${formatExact(session.modelContextWindow)}</small></td>
       <td>${formatTime(session.lastActivityAt)}</td>
@@ -335,7 +335,7 @@ function renderSessionDetail() {
       </article>
       <article class="detail-cost-card">
         <span>会话 API 等值参考成本</span>
-        <strong>${session.cost?.isPriced ? formatUsd(session.cost.estimatedCostUsd) : "无法计价"}</strong>
+        <strong>${session.cost?.isPriced ? formatCny(session.cost.estimatedCostCny) : "无法计价"}</strong>
         <p>${escapeHtml(session.model)}</p>
         <small>${session.cost?.isPriced ? `未缓存输入 ${formatTokens(session.cost.uncachedInputTokens)} · 缓存输入 ${formatTokens(session.totalUsage.cachedInputTokens)} · 输出 ${formatTokens(session.totalUsage.outputTokens)}${isPartiallyPriced(session.cost, session.totalUsage) ? ` · 未计价 ${formatTokens(Math.max(Number(session.totalUsage.totalTokens) - Number(session.cost.pricedTokens || 0), 0))}` : ""}` : "该模型没有可用参考单价"}</small>
       </article>
@@ -413,7 +413,7 @@ function renderQuestionDetails() {
 }
 
 function questionDetailRow(question) {
-  const cost = question.isCostPriced ? formatUsd(question.estimatedCostUsd) : "无法计价";
+  const cost = question.isCostPriced ? formatCny(question.estimatedCostCny) : "无法计价";
   const prompt = privacyMask ? `第 ${question.sequence} 个问题（隐私模式已隐藏正文）` : question.promptPreview;
   return `<article class="question-detail-row">
     <div class="question-sequence">${String(question.sequence).padStart(2, "0")}</div>
@@ -614,7 +614,7 @@ function usageCostPanel(estimate) {
   ];
   return `<article class="usage-estimate-card">
     <div class="usage-estimate-head">
-      <div><h3>Token 目录价估算</h3><p>每条用量按发生时间匹配当时生效的价格，优先官方，再使用第三方和内置参考价。</p></div>
+      <div><h3>Token 目录价估算</h3><p>每条用量按发生时间匹配价格：DeepSeek 使用官方中文价目并按北京时间区分高峰/空闲（高峰为工作日 9:00–12:00、14:00–18:00，节假日除外；2026 年之后仅按周末判断空闲）；其他模型按美元目录价 × 固定参考汇率 6.70 折算。</p></div>
       <span class="estimate-badge ${pricing?.isStale ? "stale" : ""}">${pricing?.isStale ? "价格已过期" : "价格可用"}</span>
     </div>
     ${pricingStatusPanel(pricing)}
@@ -623,9 +623,9 @@ function usageCostPanel(estimate) {
     </div>
     <details class="cost-rate-details">
       <summary>查看当前价格与来源</summary>
-      <div>${estimate.rates.map((rate) => `<span><b>${escapeHtml(rate.model)}</b> 输入 ${formatUsd(rate.inputUsdPerMillion)} · 缓存 ${formatUsd(rate.cachedInputUsdPerMillion)} · 输出 ${formatUsd(rate.outputUsdPerMillion)} / 百万 token<br>${escapeHtml(priceSourceLabel(rate.sourceKind))} · ${rate.effectiveFrom ? `生效于 ${formatTime(rate.effectiveFrom)}` : "无远程生效时间"}</span>`).join("")}</div>
+      <div>${estimate.rates.map((rate) => `<span><b>${escapeHtml(rate.model)}</b> 输入 ${formatCny(rate.inputCnyPerMillion)} · 缓存 ${formatCny(rate.cachedInputCnyPerMillion)} · 输出 ${formatCny(rate.outputCnyPerMillion)} / 百万 token<br>${escapeHtml(priceSourceLabel(rate.sourceKind))} · ${rate.effectiveFrom ? `生效于 ${formatTime(rate.effectiveFrom)}` : "无远程生效时间"}</span>`).join("")}</div>
     </details>
-    <p class="usage-estimate-note">金额是美元目录价估算，不是 Codex Desktop、ChatGPT 订阅或账户实际扣款。官方来源未验证时，官方覆盖金额为 0，总估算仍可使用明确标记的参考价。当前价格日期：${formatUsageDate(estimate.pricingAsOf)}。</p>
+    <p class="usage-estimate-note">金额是人民币参考估算（DeepSeek 用官方中文价目；其他模型按固定汇率 1 USD = 6.70 CNY 折算，非实时汇率），不是 Codex Desktop、ChatGPT 订阅或账户实际扣款。未提供价格的模型（如 deepseek-v4-pro）显示未计价。官方来源未验证时，官方覆盖金额为 0，总估算仍可使用明确标记的参考价。当前价格日期：${formatUsageDate(estimate.pricingAsOf)}。</p>
   </article>`;
 }
 
@@ -643,6 +643,7 @@ function pricingStatusPanel(pricing) {
 
 function priceSourceLabel(kind) {
   if (kind === "official") return "OpenAI 官方价格";
+  if (kind === "deepseek_official_builtin") return "DeepSeek 官方中文价目（内置）";
   if (kind === "third_party_reference") return "第三方参考价";
   return "内置默认参考价";
 }
@@ -668,15 +669,15 @@ function usageCostPeriod(label, tokenLabel, period) {
     : "全部已计价";
   const officialCoverage = total > 0 ? Math.min(Number(period.officialPricedTokens || 0) / total, 1) : 0;
   const coverageRows = (period.coverage || []).map((item) =>
-    `<div class="usage-estimate-projection"><span>${escapeHtml(priceSourceLabel(item.sourceKind))}</span><b>${formatTokens(item.tokens)} · ${formatUsd(item.estimatedCostUsd)}</b></div>`).join("");
+    `<div class="usage-estimate-projection"><span>${escapeHtml(priceSourceLabel(item.sourceKind))}</span><b>${formatTokens(item.tokens)} · ${formatCny(item.estimatedCostCny)}</b></div>`).join("");
   return `<section class="usage-estimate-period">
     <div class="usage-estimate-period-head"><span>${escapeHtml(label)}</span><small>${escapeHtml(unpricedNote)}</small></div>
-    <strong>${formatUsd(period.estimatedCostUsd)}</strong>
-    <p>API 等值参考成本 · 美元</p>
+    <strong>${formatCny(period.estimatedCostCny)}</strong>
+    <p>API 等值参考成本 · 人民币</p>
     <div class="usage-estimate-track" role="img" aria-label="已计价 token 覆盖 ${(coverage * 100).toFixed(1)}%"><i class="analysis-share-level-${level}"></i></div>
     <div class="usage-estimate-projection"><span>${escapeHtml(tokenLabel)}</span><b>${formatTokens(total)}</b></div>
     <div class="usage-estimate-projection"><span>计价覆盖</span><b>${(coverage * 100).toFixed(1)}%</b></div>
-    <div class="usage-estimate-projection"><span>官方覆盖</span><b>${(officialCoverage * 100).toFixed(1)}% · ${formatUsd(period.officialEstimatedCostUsd || 0)}</b></div>
+    <div class="usage-estimate-projection"><span>官方覆盖</span><b>${(officialCoverage * 100).toFixed(1)}% · ${formatCny(period.officialEstimatedCostCny || 0)}</b></div>
     <div class="usage-estimate-coverage">${coverageRows || "<small>尚无可用价格来源</small>"}</div>
     <small class="usage-estimate-range">${formatUsageDate(period.startDate)} — ${formatUsageDate(period.endDate)}</small>
   </section>`;
@@ -888,13 +889,13 @@ function renderSkills() {
           <td>${formatExact(skill.invocationCount)}</td>
           <td><strong>${formatTokens(skill.exclusiveUsage.totalTokens)}</strong><br><small>输入 ${formatTokens(skill.exclusiveUsage.inputTokens)} · 输出 ${formatTokens(skill.exclusiveUsage.outputTokens)}</small></td>
           <td>${formatTokens(skill.collaborativeUsage.totalTokens)}</td>
-          <td>${formatUsd(skill.estimatedCostUsd)}${skill.unpricedTokens > 0 ? `<br><small>${formatTokens(skill.unpricedTokens)} 未计价</small>` : ""}</td>
+          <td>${formatCny(skill.estimatedCostCny)}${skill.unpricedTokens > 0 ? `<br><small>${formatTokens(skill.unpricedTokens)} 未计价</small>` : ""}</td>
           <td>${skill.lastUsedAt ? formatTime(skill.lastUsedAt) : "尚未识别"}</td>
           <td><button class="detail-button" type="button" data-skill-name="${escapeHtml(skill.name)}">详情</button></td>
         </tr>`).join("") || '<tr><td colspan="9">当前筛选下没有 skill。</td></tr>'}</tbody>
       </table>
     </div>
-    ${data.collaborations.length ? `<div class="skill-collaboration"><div class="subsection-head"><div><h3>协同组合</h3></div><p>组合 token 不重复拆给成员</p></div>${data.collaborations.slice(0, 8).map((item) => `<article><strong>${escapeHtml(item.key)}</strong><span>${item.modelCallCount} 次模型调用 · ${formatUsd(item.estimatedCostUsd)}${item.unpricedTokens > 0 ? ` · ${formatTokens(item.unpricedTokens)} 未计价` : ""}</span><b>${formatTokens(item.usage.totalTokens)}</b></article>`).join("")}</div>` : ""}`;
+    ${data.collaborations.length ? `<div class="skill-collaboration"><div class="subsection-head"><div><h3>协同组合</h3></div><p>组合 token 不重复拆给成员</p></div>${data.collaborations.slice(0, 8).map((item) => `<article><strong>${escapeHtml(item.key)}</strong><span>${item.modelCallCount} 次模型调用 · ${formatCny(item.estimatedCostCny)}${item.unpricedTokens > 0 ? ` · ${formatTokens(item.unpricedTokens)} 未计价` : ""}</span><b>${formatTokens(item.usage.totalTokens)}</b></article>`).join("")}</div>` : ""}`;
 }
 
 function skillMetric(label, value, note) {
@@ -1009,8 +1010,8 @@ function projectRankingTable(items) {
 }
 
 function formatProjectCost(project) {
-  if (project.estimatedCostUsd === 0 && project.unpricedTokens > 0) return "无法计价";
-  return `${formatUsd(project.estimatedCostUsd)}${project.unpricedTokens > 0 ? ` · ${formatTokens(project.unpricedTokens)} 未计价` : ""}`;
+  if (project.estimatedCostCny === 0 && project.unpricedTokens > 0) return "无法计价";
+  return `${formatCny(project.estimatedCostCny)}${project.unpricedTokens > 0 ? ` · ${formatTokens(project.unpricedTokens)} 未计价` : ""}`;
 }
 
 function rankingNumber(index) {

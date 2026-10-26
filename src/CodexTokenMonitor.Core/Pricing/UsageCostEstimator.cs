@@ -6,15 +6,17 @@ public static class UsageCostEstimator
 {
     private const decimal TokensPerMillion = 1_000_000m;
 
-    public static DateOnly PricingAsOf { get; } = new(2026, 8, 27);
+    public static DateOnly PricingAsOf { get; } = new(2026, 10, 10);
 
+    // 非 DeepSeek 模型的内置参考价：美元目录价 × 固定参考汇率 6.70，单位人民币元 / 百万 token。
+    // DeepSeek 不使用该表，由 PriceCatalog 通过 DeepSeekPricing 按事件时间（北京时间高峰/空闲）计价。
     public static IReadOnlyList<ModelPriceRate> Rates { get; } =
     [
-        new("gpt-5.6-sol", 4m, 0.4m, 20m),
-        new("gpt-5.6-terra", 2m, 0.2m, 12m),
-        new("gpt-5.6-luna", 0.2m, 0.02m, 1.2m),
-        new("gpt-5.5", 5m, 0.5m, 30m),
-        new("gpt-5.4", 2.5m, 0.25m, 15m)
+        new("gpt-5.6-sol", 26.8m, 2.68m, 134m),
+        new("gpt-5.6-terra", 13.4m, 1.34m, 80.4m),
+        new("gpt-5.6-luna", 1.34m, 0.134m, 8.04m),
+        new("gpt-5.5", 33.5m, 3.35m, 201m),
+        new("gpt-5.4", 16.75m, 1.675m, 100.5m)
     ];
 
     public static UsageCostPeriod EstimatePeriod(
@@ -24,7 +26,7 @@ public static class UsageCostEstimator
     {
         var models = modelUsage
             .Select(item => EstimateModel(item.Model, item.Usage))
-            .OrderByDescending(item => item.EstimatedCostUsd)
+            .OrderByDescending(item => item.EstimatedCostCny)
             .ThenByDescending(item => item.Usage.TotalTokens)
             .ToArray();
 
@@ -34,10 +36,11 @@ public static class UsageCostEstimator
             SumUsage(models.Select(item => item.Usage)),
             models.Sum(item => item.PricedTokens),
             models.Where(item => !item.IsPriced).Sum(item => item.Usage.TotalTokens),
-            models.Sum(item => item.EstimatedCostUsd),
+            models.Sum(item => item.EstimatedCostCny),
             models);
     }
 
+    // 不带事件时间的估算只能使用静态内置价；DeepSeek 需要按事件时间判断高峰/空闲，请使用 EstimateTimedPeriod。
     public static ModelUsageCost EstimateModel(string model, TokenUsage usage)
     {
         var normalized = string.IsNullOrWhiteSpace(model) ? "unknown" : model.Trim().ToLowerInvariant();
@@ -51,9 +54,9 @@ public static class UsageCostEstimator
         var cachedInput = Math.Clamp(usage.CachedInputTokens, 0, usage.InputTokens);
         var uncachedInput = Math.Max(usage.InputTokens - cachedInput, 0);
         var pricedTokens = usage.TotalTokens;
-        var cost = uncachedInput / TokensPerMillion * rate.InputUsdPerMillion
-            + cachedInput / TokensPerMillion * rate.CachedInputUsdPerMillion
-            + usage.OutputTokens / TokensPerMillion * rate.OutputUsdPerMillion;
+        var cost = uncachedInput / TokensPerMillion * rate.InputCnyPerMillion
+            + cachedInput / TokensPerMillion * rate.CachedInputCnyPerMillion
+            + usage.OutputTokens / TokensPerMillion * rate.OutputCnyPerMillion;
 
         return new ModelUsageCost(
             normalized,
@@ -86,7 +89,7 @@ public static class UsageCostEstimator
 
         var models = accumulators.Values
             .Select(item => item.Build())
-            .OrderByDescending(item => item.EstimatedCostUsd)
+            .OrderByDescending(item => item.EstimatedCostCny)
             .ThenByDescending(item => item.Usage.TotalTokens)
             .ToArray();
         var coverage = MergeCoverage(models.SelectMany(item => item.Coverage ?? []));
@@ -100,11 +103,11 @@ public static class UsageCostEstimator
             usage,
             pricedTokens,
             Math.Max(usage.TotalTokens - pricedTokens, 0),
-            decimal.Round(models.Sum(item => item.EstimatedCostUsd), 6, MidpointRounding.AwayFromZero),
+            decimal.Round(models.Sum(item => item.EstimatedCostCny), 6, MidpointRounding.AwayFromZero),
             models,
             coverage,
             official?.Tokens ?? 0,
-            official?.EstimatedCostUsd ?? 0m);
+            official?.EstimatedCostCny ?? 0m);
     }
 
     private static string NormalizeModel(string model) =>
@@ -116,7 +119,7 @@ public static class UsageCostEstimator
             .Select(group => new PriceCoverageSummary(
                 group.Key,
                 group.Sum(item => item.Tokens),
-                decimal.Round(group.Sum(item => item.EstimatedCostUsd), 6, MidpointRounding.AwayFromZero)))
+                decimal.Round(group.Sum(item => item.EstimatedCostCny), 6, MidpointRounding.AwayFromZero)))
             .OrderBy(item => PriceSourceKinds.Priority(item.SourceKind))
             .ToArray();
 
@@ -163,7 +166,7 @@ public static class UsageCostEstimator
                 return;
             }
 
-            var cost = tokens / TokensPerMillion * price.UsdPerMillion;
+            var cost = tokens / TokensPerMillion * price.CnyPerMillion;
             _pricedTokens += tokens;
             _cost += cost;
             _hasBackfill |= price.IsBackfilled;

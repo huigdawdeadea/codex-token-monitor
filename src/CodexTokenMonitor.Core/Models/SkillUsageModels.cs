@@ -89,7 +89,7 @@ public sealed record SkillUsageRanking(
     long AverageLoadedTokens,
     TokenUsage ExclusiveUsage,
     TokenUsage CollaborativeUsage,
-    decimal EstimatedCostUsd,
+    decimal EstimatedCostCny,
     long UnpricedTokens,
     DateTimeOffset? LastUsedAt,
     IReadOnlyList<SkillVersionSummary> Versions);
@@ -110,7 +110,7 @@ public sealed record SkillCollaborationSummary(
     string SkillNames,
     int ModelCallCount,
     TokenUsage Usage,
-    decimal EstimatedCostUsd,
+    decimal EstimatedCostCny,
     long UnpricedTokens,
     DateTimeOffset LastUsedAt);
 

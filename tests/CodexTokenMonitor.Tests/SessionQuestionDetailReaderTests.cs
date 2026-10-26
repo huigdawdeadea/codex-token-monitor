@@ -32,7 +32,7 @@ public sealed class SessionQuestionDetailReaderTests
         Assert.Equal(120, first.Usage.CachedInputTokens);
         Assert.Equal(30, first.Usage.OutputTokens);
         Assert.Equal(180, first.Usage.TotalTokens);
-        Assert.Equal(0.000768m, first.EstimatedCostUsd);
+        Assert.Equal(0.005146m, first.EstimatedCostCny);
         Assert.True(first.IsCostPriced);
         Assert.Equal("Second question", result.Questions[1].PromptPreview);
         Assert.Equal(0, result.Questions[1].ModelCallCount);

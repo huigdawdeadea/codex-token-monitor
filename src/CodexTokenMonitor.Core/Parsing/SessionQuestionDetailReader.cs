@@ -55,7 +55,7 @@ public sealed class SessionQuestionDetailReader(RolloutEventParser tokenParser)
                 parsedEvent is ParsedTokenEvent tokenEvent)
             {
                 current ??= new PendingQuestion(null, tokenEvent.Timestamp, fallbackModel);
-                current.AddUsage(tokenEvent.LastUsage);
+                current.AddUsage(tokenEvent.LastUsage, tokenEvent.Timestamp);
                 continue;
             }
 
@@ -159,6 +159,7 @@ public sealed class SessionQuestionDetailReader(RolloutEventParser tokenParser)
     private sealed class PendingQuestion(string? turnId, DateTimeOffset startedAt, string model)
     {
         private readonly List<string> _promptParts = [];
+        private readonly List<(DateTimeOffset EventAt, TokenUsage Usage)> _usageEvents = [];
 
         public int ModelCallCount { get; private set; }
         public TokenUsage Usage { get; private set; } = TokenUsage.Empty;
@@ -172,9 +173,10 @@ public sealed class SessionQuestionDetailReader(RolloutEventParser tokenParser)
             }
         }
 
-        public void AddUsage(TokenUsage usage)
+        public void AddUsage(TokenUsage usage, DateTimeOffset eventAt)
         {
             ModelCallCount++;
+            _usageEvents.Add((eventAt, usage));
             Usage = new TokenUsage(
                 Usage.InputTokens + usage.InputTokens,
                 Usage.CachedInputTokens + usage.CachedInputTokens,
@@ -193,7 +195,7 @@ public sealed class SessionQuestionDetailReader(RolloutEventParser tokenParser)
             var preview = string.IsNullOrWhiteSpace(normalizedPrompt)
                 ? $"第 {sequence} 次调用"
                 : truncated ? normalizedPrompt[..PromptPreviewLength] + "..." : normalizedPrompt;
-            var cost = UsageCostEstimator.EstimateModel(model, Usage);
+            var cost = EstimateCost();
             return new SessionQuestionDetail(
                 sequence,
                 turnId,
@@ -203,8 +205,27 @@ public sealed class SessionQuestionDetailReader(RolloutEventParser tokenParser)
                 model,
                 ModelCallCount,
                 Usage,
-                cost.EstimatedCostUsd,
+                cost.EstimatedCostCny,
                 cost.IsPriced);
+        }
+
+        private ModelUsageCost EstimateCost()
+        {
+            if (_usageEvents.Count == 0)
+            {
+                return new ModelUsageCost(model, Usage, 0, 0, 0m, false);
+            }
+
+            var first = _usageEvents.Min(item => item.EventAt);
+            var last = _usageEvents.Max(item => item.EventAt);
+            var period = UsageCostEstimator.EstimateTimedPeriod(
+                DateOnly.FromDateTime(first.LocalDateTime),
+                DateOnly.FromDateTime(last.LocalDateTime),
+                _usageEvents.Select(item => new TimedModelUsage(model, item.EventAt, item.Usage)),
+                new PriceCatalog([]));
+            return period.Models.Count == 1
+                ? period.Models[0]
+                : new ModelUsageCost(model, Usage, 0, 0, 0m, false);
         }
     }
 }

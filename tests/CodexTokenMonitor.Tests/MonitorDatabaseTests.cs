@@ -423,12 +423,12 @@ public sealed class MonitorDatabaseTests
         Assert.Equal(100, summary.CostEstimate.Daily.Usage.TotalTokens);
         Assert.Equal(100, summary.CostEstimate.Daily.PricedTokens);
         Assert.Equal(0, summary.CostEstimate.Daily.UnpricedTokens);
-        Assert.Equal(0.000576m, summary.CostEstimate.Daily.EstimatedCostUsd);
-        Assert.Equal(0.000576m, summary.CostEstimate.Weekly.EstimatedCostUsd);
-        Assert.Equal(0.000576m, summary.CostEstimate.Monthly.EstimatedCostUsd);
+        Assert.Equal(0.003859m, summary.CostEstimate.Daily.EstimatedCostCny);
+        Assert.Equal(0.003859m, summary.CostEstimate.Weekly.EstimatedCostCny);
+        Assert.Equal(0.003859m, summary.CostEstimate.Monthly.EstimatedCostCny);
         Assert.Equal(today, summary.CostEstimate.Daily.StartDate);
         Assert.Equal(today, summary.CostEstimate.Monthly.EndDate);
-        Assert.Equal("USD", summary.CostEstimate.Currency);
+        Assert.Equal("CNY", summary.CostEstimate.Currency);
     }
 
     [Fact]
@@ -540,7 +540,7 @@ public sealed class MonitorDatabaseTests
         Assert.Equal(2, project.SessionCount);
         Assert.Equal(2, project.ModelCount);
         Assert.Equal(800, project.Usage.TotalTokens);
-        Assert.True(project.EstimatedCostUsd > 0);
+        Assert.True(project.EstimatedCostCny > 0);
         Assert.Equal(0, project.UnpricedTokens);
     }
 

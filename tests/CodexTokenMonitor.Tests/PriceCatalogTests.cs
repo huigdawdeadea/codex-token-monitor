@@ -29,7 +29,7 @@ public sealed class PriceCatalogTests
             events,
             catalog);
 
-        Assert.Equal(9m, period.EstimatedCostUsd);
+        Assert.Equal(60.30m, period.EstimatedCostCny);
         Assert.Equal(4_000_000, period.PricedTokens);
         Assert.Equal(PriceSourceKinds.ThirdPartyReference, Assert.Single(period.Coverage!).SourceKind);
     }
@@ -49,7 +49,7 @@ public sealed class PriceCatalogTests
             catalog);
 
         var model = Assert.Single(period.Models);
-        Assert.Equal(2m, model.EstimatedCostUsd);
+        Assert.Equal(13.40m, model.EstimatedCostCny);
         Assert.True(model.HasBackfilledPrice);
     }
 
@@ -65,7 +65,7 @@ public sealed class PriceCatalogTests
         var resolved = catalog.Resolve("gpt-test", PriceComponent.Input, first.AddDays(20));
 
         Assert.NotNull(resolved);
-        Assert.Equal(3m, resolved.UsdPerMillion);
+        Assert.Equal(20.10m, resolved.CnyPerMillion);
         Assert.Equal(PriceSourceKinds.Official, resolved.SourceKind);
     }
 
@@ -324,7 +324,7 @@ public sealed class PriceCatalogTests
 
         var summary = await database.GetUsageSummaryAsync(7);
 
-        Assert.Equal(2.4m, summary.CostEstimate.Daily.EstimatedCostUsd);
+        Assert.Equal(16.08m, summary.CostEstimate.Daily.EstimatedCostCny);
         var coverage = Assert.Single(summary.CostEstimate.Daily.Coverage!);
         Assert.Equal(2_000_000, coverage.Tokens);
         Assert.Equal(PriceSourceKinds.ThirdPartyReference, coverage.SourceKind);

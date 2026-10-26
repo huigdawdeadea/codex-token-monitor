@@ -3,15 +3,17 @@ namespace CodexTokenMonitor.Core.Models;
 public static class PriceSourceKinds
 {
     public const string Official = "official";
+    public const string DeepSeekOfficialBuiltin = "deepseek_official_builtin";
     public const string ThirdPartyReference = "third_party_reference";
     public const string BuiltInDefault = "built_in_default";
 
     public static int Priority(string sourceKind) => sourceKind switch
     {
         Official => 0,
-        ThirdPartyReference => 1,
-        BuiltInDefault => 2,
-        _ => 3
+        DeepSeekOfficialBuiltin => 1,
+        ThirdPartyReference => 2,
+        BuiltInDefault => 3,
+        _ => 4
     };
 }
 
@@ -76,7 +78,7 @@ public sealed record PricingStatusSnapshot(
 public sealed record PriceCoverageSummary(
     string SourceKind,
     long Tokens,
-    decimal EstimatedCostUsd);
+    decimal EstimatedCostCny);
 
 public sealed record TimedModelUsage(
     string Model,
